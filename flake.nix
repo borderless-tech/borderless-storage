@@ -23,17 +23,10 @@
             # Override the Rust toolchain to include llvm-tools-preview
             (rust-bin.stable.latest.default.override {
               extensions = [ "llvm-tools-preview" ];
-              targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" "wasm32-wasip2" ];
+              targets = [ ];
             })
             rustc
             cargo
-            cargo-edit
-            cargo-audit
-            cargo-tarpaulin
-            cargo-flamegraph
-          ] ++ lib.optionals pkgs.stdenv.isDarwin [
-            # Additional darwin specific inputs can be set here
-            pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
           ];
 
           # Certain Rust tools won't work without this
