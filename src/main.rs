@@ -5,6 +5,8 @@ use clap::Parser;
 use tracing::info;
 use utils::check_directory_access;
 
+mod server;
+mod storage;
 mod utils;
 
 #[derive(Parser, Debug)]
@@ -29,5 +31,6 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     info!("Initializing webserver on {}...", socket_addr);
 
+    server::start(socket_addr).await?;
     Ok(())
 }
