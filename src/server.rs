@@ -12,16 +12,15 @@ use axum::{
     body::Body,
     extract::{Path, Request, State},
     http::{
-        HeaderMap,
+        HeaderMap, StatusCode,
         header::{AUTHORIZATION, CONTENT_TYPE},
-        request,
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
@@ -31,7 +30,9 @@ use uuid::Uuid;
 use self::error::Error;
 use crate::{
     storage::FsController,
-    utils::{byte_size_str, extract_sig_from_query, verify_presigned_signature},
+    utils::{
+        byte_size_str, extract_sig_from_query, generate_presigned_url, verify_presigned_signature,
+    },
 };
 
 /// Http-header to specify the upload type
@@ -81,6 +82,7 @@ pub async fn start(addr: SocketAddr, fs_controller: FsController) -> anyhow::Res
     let service = Router::new()
         .merge(api_key_protected)
         .merge(pre_sign_protected)
+        .fallback(reject_404) // NOTE: Without the fallback, we would always hit the authorization layer
         .layer(middleware::from_fn(metrics));
 
     axum::serve(listener, service).await?;
@@ -95,6 +97,10 @@ struct AuthState {
     domain: String,
     /// API-Key to generate pre-signed urls
     api_key: String,
+}
+
+async fn reject_404() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 /// Middleware that checks if the request is authorized with the proper API-key
@@ -177,6 +183,8 @@ mod error {
         BrokenStream,
         #[error("file not found")]
         NotFound,
+        #[error("Missing required parameter 'blob_id'")]
+        MissingBlobId,
         #[error("{0}")]
         Unauthorized(String),
         #[error("failed to parse header values: {0}")]
@@ -469,11 +477,66 @@ async fn stream_body_to_file(body: Body, target_path: PathBuf, tmp_path: PathBuf
     Ok(bytes_written)
 }
 
-struct PresignDto {
-    method: String,
-    path: String,
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PresignAction {
+    Upload,
+    Download,
 }
 
-async fn presign_url(State(auth): State<Arc<AuthState>>) {
-    /* TODO */
+#[derive(Serialize)]
+pub struct PresignResponse {
+    pub success: bool,
+    pub action: PresignAction,
+    pub blob_id: Uuid,
+    pub url: String,
+    pub method: String,
+    pub expires_in: u64, // seconds
+}
+
+#[derive(Deserialize)]
+pub struct PresignRequest {
+    pub action: PresignAction,
+
+    /// Optional: server can generate one if not provided (only valid for uploads)
+    #[serde(default)]
+    pub blob_id: Option<Uuid>,
+
+    /// Optional: duration in seconds, server clamps to max allowed
+    #[serde(default)]
+    pub expires_in: Option<u64>,
+}
+
+async fn presign_url(
+    State(auth): State<Arc<AuthState>>,
+    Json(presign): Json<PresignRequest>,
+) -> Result<Json<PresignResponse>> {
+    let expires_in = presign.expires_in.unwrap_or(60 * 15); // 15 minutes default
+
+    let (method, path, blob_id) = match presign.action {
+        PresignAction::Upload => {
+            let blob_id = presign.blob_id.unwrap_or_else(|| Uuid::now_v7());
+            ("POST", format!("/upload/{blob_id}"), blob_id)
+        }
+        PresignAction::Download => {
+            let blob_id = match presign.blob_id {
+                Some(id) => id,
+                None => return Err(Error::MissingBlobId),
+            };
+            ("GET", format!("/files/{blob_id}"), blob_id)
+        }
+    };
+
+    let signed_url =
+        generate_presigned_url(method, &auth.domain, &path, &auth.hmac_secret, expires_in);
+
+    let res = PresignResponse {
+        success: true,
+        action: presign.action,
+        blob_id,
+        url: signed_url,
+        method: method.to_string(),
+        expires_in,
+    };
+    Ok(Json(res))
 }
