@@ -19,7 +19,7 @@ use futures::StreamExt;
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
-use tracing::{Level, debug, info, instrument, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use self::error::Error;
@@ -50,7 +50,7 @@ pub async fn start(addr: SocketAddr, fs_controller: FsController) -> anyhow::Res
     let listener = TcpListener::bind(addr).await?;
 
     let service = Router::new()
-        .route("/upload/{blob_id}", post(upload_data).put(upload_data))
+        .route("/upload/{blob_id}", post(upload_data))
         .route("/files/{blob_id}", get(read_blob))
         .layer(middleware::from_fn(auth_middleware_dummy))
         .layer(middleware::from_fn(metrics))
