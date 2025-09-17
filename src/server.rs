@@ -257,16 +257,33 @@ async fn upload_data(
     let upload_type = UploadType::from_headers(&headers)?;
 
     match upload_type {
-        UploadType::Full => upload_full(storage, blob_id, body).await,
+        UploadType::Full => {
+            let r = upload_full(storage, blob_id, body).await;
+            if let Err(e) = &r {
+                warn!(%blob_id, "{e}");
+            }
+            r
+        }
         UploadType::Chunked {
             chunk_idx,
             chunk_total,
-        } => upload_chunk(storage, blob_id, chunk_idx, chunk_total, body).await,
-        UploadType::Merge { chunk_total } => merge_chunks(storage, blob_id, chunk_total).await,
+        } => {
+            let r = upload_chunk(storage, blob_id, chunk_idx, chunk_total, body).await;
+            if let Err(e) = &r {
+                warn!(%blob_id, chunk_idx, chunk_total, "{e}");
+            }
+            r
+        }
+        UploadType::Merge { chunk_total } => {
+            let r = merge_chunks(storage, blob_id, chunk_total).await;
+            if let Err(e) = &r {
+                warn!(%blob_id, chunk_total, "{e}");
+            }
+            r
+        }
     }
 }
 
-#[instrument(skip_all, fields( %blob_id, %chunk_idx, %chunk_total ), err(level = Level::WARN))]
 async fn upload_chunk(
     storage: FsController,
     blob_id: Uuid,
@@ -290,7 +307,6 @@ async fn upload_chunk(
     Ok(Json(success))
 }
 
-#[instrument(skip_all, fields( %blob_id, %chunk_total ), err(level = Level::WARN))]
 async fn merge_chunks(
     storage: FsController,
     blob_id: Uuid,
@@ -321,7 +337,6 @@ async fn merge_chunks(
 }
 
 /// Helper function to perform the oneshot (full) upload
-#[instrument(skip_all, fields( %blob_id ), err(level = Level::WARN))]
 async fn upload_full(storage: FsController, blob_id: Uuid, body: Body) -> Result<Json<Success>> {
     let (blob_path, blob_tmp) = storage.blob_path(&blob_id);
     if blob_path.exists() {
