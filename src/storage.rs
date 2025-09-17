@@ -1,5 +1,5 @@
 use std::{
-    fs::{File, create_dir, create_dir_all, remove_dir, remove_file, rename},
+    fs::{File, create_dir, create_dir_all, remove_dir_all, remove_file, rename},
     io::{self, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -118,7 +118,7 @@ impl FsController {
         // Write blob file and cleanup chunks
         writer.flush()?;
         rename(&final_tmp, &final_path)?;
-        remove_dir(chunk_sub_dir)?;
+        remove_dir_all(chunk_sub_dir)?;
 
         Ok(bytes_written as usize)
     }
