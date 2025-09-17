@@ -10,15 +10,16 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Request, State},
-    http::HeaderMap,
+    http::{HeaderMap, header::CONTENT_TYPE},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::post,
+    response::Response,
+    routing::{get, post},
 };
 use futures::StreamExt;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tracing::{debug, info};
+use tokio_util::io::ReaderStream;
+use tracing::{Level, debug, info, instrument, warn};
 use uuid::Uuid;
 
 use self::error::Error;
@@ -50,6 +51,7 @@ pub async fn start(addr: SocketAddr, fs_controller: FsController) -> anyhow::Res
 
     let service = Router::new()
         .route("/upload/{blob_id}", post(upload_data).put(upload_data))
+        .route("/files/{blob_id}", get(read_blob))
         .layer(middleware::from_fn(auth_middleware_dummy))
         .layer(middleware::from_fn(metrics))
         .with_state(fs_controller);
@@ -95,8 +97,12 @@ mod error {
         Duplicate,
         #[error("stream was interrupted or broken")]
         BrokenStream,
+        #[error("file not found")]
+        NotFound,
         #[error("failed to parse header values: {0}")]
         Headers(String),
+        #[error("failed to build response: {0}")]
+        ResponseFailed(#[from] axum::http::Error),
         #[error(transparent)]
         Io(#[from] std::io::Error),
     }
@@ -104,7 +110,7 @@ mod error {
     impl IntoResponse for Error {
         fn into_response(self) -> Response {
             let status = match &self {
-                Error::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                Error::Io(_) | Error::ResponseFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 _ => StatusCode::BAD_REQUEST,
             };
             let message = self.to_string();
@@ -154,8 +160,22 @@ type Result<T> = std::result::Result<T, Error>;
 async fn read_blob(
     State(storage): State<FsController>,
     Path(blob_id): Path<Uuid>,
-) -> impl IntoResponse {
-    axum::http::StatusCode::OK
+) -> Result<Response> {
+    let (blob_path, _) = storage.blob_path(&blob_id);
+
+    let f = tokio::fs::File::open(blob_path)
+        .await
+        .map_err(|_| Error::NotFound)?;
+
+    // Stream file content into a response
+    let stream = ReaderStream::new(f);
+    let body = Body::from_stream(stream);
+
+    let response = Response::builder()
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .body(body)?;
+
+    Ok(response)
 }
 
 enum UploadType {
@@ -246,7 +266,7 @@ async fn upload_data(
     }
 }
 
-#[tracing::instrument(skip_all, fields ( %blob_id ), err)]
+#[instrument(skip_all, fields( %blob_id, %chunk_idx, %chunk_total ), err(level = Level::WARN))]
 async fn upload_chunk(
     storage: FsController,
     blob_id: Uuid,
@@ -270,7 +290,7 @@ async fn upload_chunk(
     Ok(Json(success))
 }
 
-#[tracing::instrument(skip_all, fields ( %blob_id ), err)]
+#[instrument(skip_all, fields( %blob_id, %chunk_total ), err(level = Level::WARN))]
 async fn merge_chunks(
     storage: FsController,
     blob_id: Uuid,
@@ -301,7 +321,7 @@ async fn merge_chunks(
 }
 
 /// Helper function to perform the oneshot (full) upload
-#[tracing::instrument(skip_all, fields ( %blob_id ), err)]
+#[instrument(skip_all, fields( %blob_id ), err(level = Level::WARN))]
 async fn upload_full(storage: FsController, blob_id: Uuid, body: Body) -> Result<Json<Success>> {
     let (blob_path, blob_tmp) = storage.blob_path(&blob_id);
     if blob_path.exists() {
