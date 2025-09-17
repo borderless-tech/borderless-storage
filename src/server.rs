@@ -2,6 +2,7 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     net::SocketAddr,
+    path::PathBuf,
     time::Instant,
 };
 
@@ -17,7 +18,7 @@ use axum::{
 use futures::StreamExt;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use self::error::Error;
@@ -48,7 +49,7 @@ pub async fn start(addr: SocketAddr, fs_controller: FsController) -> anyhow::Res
     let listener = TcpListener::bind(addr).await?;
 
     let service = Router::new()
-        .route("/upload/{blob_id}", post(write_blob).put(write_blob))
+        .route("/upload/{blob_id}", post(upload_data).put(upload_data))
         .layer(middleware::from_fn(auth_middleware_dummy))
         .layer(middleware::from_fn(metrics))
         .with_state(fs_controller);
@@ -92,8 +93,6 @@ mod error {
     pub enum Error {
         #[error("Duplicate ID - refuse to overwrite")]
         Duplicate,
-        // #[error("Item is not a file (but should be)")]
-        // NotAFile,
         #[error("stream was interrupted or broken")]
         BrokenStream,
         #[error("failed to parse header values: {0}")]
@@ -109,7 +108,7 @@ mod error {
                 _ => StatusCode::BAD_REQUEST,
             };
             let message = self.to_string();
-            let s = Success::new_false(message);
+            let s = Success::error(message);
             let body = serde_json::to_vec(&s).unwrap_or_default();
             Response::builder()
                 .status(status)
@@ -130,26 +129,27 @@ mod error {
 struct Success {
     success: bool,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blob_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_written: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    missing_chunks: Option<Vec<usize>>,
 }
 
 impl Success {
-    pub fn new_false(message: impl AsRef<str>) -> Self {
+    pub fn error(message: impl AsRef<str>) -> Self {
         Success {
             success: false,
             message: message.as_ref().to_string(),
-        }
-    }
-
-    pub fn new_true(message: impl AsRef<str>) -> Self {
-        Success {
-            success: true,
-            message: message.as_ref().to_string(),
+            blob_id: None,
+            bytes_written: None,
+            missing_chunks: None,
         }
     }
 }
 
 type Result<T> = std::result::Result<T, Error>;
-type JResult = Result<Json<Success>>;
 
 async fn read_blob(
     State(storage): State<FsController>,
@@ -226,12 +226,13 @@ impl UploadType {
     }
 }
 
-async fn write_blob(
+/// General entrypoint for the upload logic
+async fn upload_data(
     State(storage): State<FsController>,
     Path(blob_id): Path<Uuid>,
     headers: HeaderMap,
     body: Body,
-) -> JResult {
+) -> Result<Json<Success>> {
     // 1. Determine file upload type from headers
     let upload_type = UploadType::from_headers(&headers)?;
 
@@ -241,84 +242,108 @@ async fn write_blob(
             chunk_idx,
             chunk_total,
         } => upload_chunk(storage, blob_id, chunk_idx, chunk_total, body).await,
-        UploadType::Merge { chunk_total } => todo!(),
+        UploadType::Merge { chunk_total } => merge_chunks(storage, blob_id, chunk_total).await,
     }
 }
 
-// TODO: Other return type here
+#[tracing::instrument(skip_all, fields ( %blob_id ), err)]
 async fn upload_chunk(
     storage: FsController,
     blob_id: Uuid,
     chunk_idx: usize,
     chunk_total: usize,
     body: Body,
-) -> JResult {
+) -> Result<Json<Success>> {
     let (chunk_path, chunk_tmp) = storage.chunk_path(&blob_id, chunk_idx, chunk_total)?;
-    let f = File::create(&chunk_tmp)?;
-    let mut writer = BufWriter::new(f);
-    let mut stream = body.into_data_stream();
-    let mut bytes_written = 0;
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(b) => {
-                writer.write_all(&b)?;
-                bytes_written += b.len();
-            }
-            Err(e) => {
-                warn!(%blob_id, "Error receiving blob: {e}");
-                return Err(Error::BrokenStream);
-            }
-        }
-    }
-    writer.flush()?;
-    std::fs::rename(&chunk_tmp, &chunk_path)?;
+    let bytes_written = stream_body_to_file(body, chunk_path, chunk_tmp).await?;
     let bytes = byte_size_str(bytes_written);
     debug!(%blob_id, %bytes, "uploaded chunk {chunk_idx}/{chunk_total}");
-    Ok(Json(Success::new_true(format!(
-        "received chunk {chunk_idx}/{chunk_total} for {blob_id}, size {bytes}"
-    ))))
+
+    let success = Success {
+        success: true,
+        message: format!("uploaded chunk {chunk_idx}/{chunk_total}"),
+        blob_id: Some(blob_id),
+        bytes_written: Some(bytes_written),
+        missing_chunks: None,
+    };
+
+    Ok(Json(success))
 }
 
-async fn merge_chunks(storage: FsController, blob_id: Uuid, chunk_total: usize) -> JResult {
+#[tracing::instrument(skip_all, fields ( %blob_id ), err)]
+async fn merge_chunks(
+    storage: FsController,
+    blob_id: Uuid,
+    chunk_total: usize,
+) -> Result<Json<Success>> {
     // 1. Check that all chunks are present
     if let Err(missing_chunks) = storage.check_chunks(&blob_id, chunk_total) {
-        todo!("return missing list of chunks")
+        return Ok(Json(Success {
+            success: false,
+            message: format!("missing {} of {} chunks", missing_chunks.len(), chunk_total),
+            blob_id: Some(blob_id),
+            bytes_written: None,
+            missing_chunks: Some(missing_chunks),
+        }));
     }
-    todo!()
+
+    let bytes_written = storage.merge_chunks(&blob_id, chunk_total)?;
+    let bytes = byte_size_str(bytes_written);
+    debug!(%blob_id, %bytes, "merged chunks");
+    let success = Success {
+        success: true,
+        message: format!("merged {} chunks", chunk_total),
+        blob_id: Some(blob_id),
+        bytes_written: Some(bytes_written),
+        missing_chunks: None,
+    };
+    Ok(Json(success))
 }
 
 /// Helper function to perform the oneshot (full) upload
-async fn upload_full(storage: FsController, blob_id: Uuid, body: Body) -> JResult {
-    // TODO: Move that function somewhere else
-    // ++ use ".tmp" and create cleanup routine
+#[tracing::instrument(skip_all, fields ( %blob_id ), err)]
+async fn upload_full(storage: FsController, blob_id: Uuid, body: Body) -> Result<Json<Success>> {
     let (blob_path, blob_tmp) = storage.blob_path(&blob_id);
-
     if blob_path.exists() {
         return Err(Error::Duplicate);
     }
+    let bytes_written = stream_body_to_file(body, blob_path, blob_tmp).await?;
+    let bytes = byte_size_str(bytes_written);
+    debug!(%blob_id, %bytes, "uploaded blob");
+    let success = Success {
+        success: true,
+        message: "uploaded blob".to_string(),
+        blob_id: Some(blob_id),
+        bytes_written: Some(bytes_written),
+        missing_chunks: None,
+    };
+    Ok(Json(success))
+}
 
-    // TODO: Can we count the bytes here ?
-    let f = File::create(&blob_tmp)?;
+/// Helper function that streams the content of a http-body into a file
+///
+/// First a temporary file is created at `tmp_path`, which the bytes will be streamed to.
+/// After the stream has finished, the `tmp_path` is renamed into `target_path`.
+///
+/// This way we will not end up with broken files due to interrupted connections.
+/// All files with the `.tmp` suffix can later be spotted and removed.
+async fn stream_body_to_file(body: Body, target_path: PathBuf, tmp_path: PathBuf) -> Result<usize> {
+    let f = File::create(&tmp_path)?;
     let mut writer = BufWriter::new(f);
-    let mut stream = body.into_data_stream();
     let mut bytes_written = 0;
+    let mut stream = body.into_data_stream();
     while let Some(result) = stream.next().await {
         match result {
             Ok(b) => {
                 writer.write_all(&b)?;
                 bytes_written += b.len();
             }
-            Err(e) => {
-                warn!(%blob_id, "Error receiving blob: {e}");
+            Err(_) => {
                 return Err(Error::BrokenStream);
             }
         }
     }
     writer.flush()?;
-    std::fs::rename(&blob_tmp, &blob_path)?;
-    let bytes = byte_size_str(bytes_written);
-    debug!(%blob_id, %bytes, "uploaded blob");
-    Ok(Json(Success::new_true(format!(
-        "received {blob_id}, size {bytes}"
-    ))))
+    std::fs::rename(&tmp_path, &target_path)?;
+    Ok(bytes_written)
 }
