@@ -292,6 +292,11 @@ async fn upload_chunk(
     body: Body,
 ) -> Result<Json<Success>> {
     let (chunk_path, chunk_tmp) = storage.chunk_path(&blob_id, chunk_idx, chunk_total)?;
+    // Check, if there is a blob with that ID
+    let (blob_path, _) = storage.blob_path(&blob_id);
+    if blob_path.exists() {
+        return Err(Error::Duplicate);
+    }
     let bytes_written = stream_body_to_file(body, chunk_path, chunk_tmp).await?;
     let bytes = byte_size_str(bytes_written);
     debug!(%blob_id, %bytes, "uploaded chunk {chunk_idx}/{chunk_total}");
