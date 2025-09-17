@@ -1,41 +1,62 @@
-use std::{net::ToSocketAddrs, path::PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
+use config::Config;
 use storage::FsController;
 use tracing::{Level, info};
-use utils::check_directory_access;
 
+mod config;
 mod server;
 mod storage;
 mod utils;
 
+/// Commandline arguments
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    data_dir: PathBuf,
-    ip_addr: String,
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+
+    #[arg(long)]
+    ip_addr: Option<String>,
+
+    #[arg(long)]
+    domain: Option<String>,
+
+    #[arg(short, long)]
+    config: Option<PathBuf>,
 }
+
+/*
+* TODOs
+Request size limits
+Rate limiting
+Cleanup service
+
+Graceful shutdown
+Metrics
+Configurable limits
+*
+*/
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    check_directory_access(&args.data_dir)?;
 
-    let socket_addr = args
-        .ip_addr
-        .to_socket_addrs()?
-        .filter(|s| s.is_ipv4())
-        .next()
-        .context("Failed to parse socket address")?;
+    let config = Config::init(args)?;
 
-    let fs_controller = FsController::init(&args.data_dir)?;
+    let fs_controller = FsController::init(&config.data_dir)?;
+
+    // TODO: Implement periodic cleanup logic
 
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .init();
-    info!("Initializing webserver on {}...", socket_addr);
+    info!("📦 Data-Directory: {}", config.data_dir.display());
+    info!("🔒 Domain: {}", config.domain);
+    info!("🌐 Listening on {}...", config.ip_addr);
 
-    server::start(socket_addr, fs_controller).await?;
+    server::start(config, fs_controller).await?;
     Ok(())
 }

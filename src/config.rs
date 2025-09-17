@@ -1,0 +1,86 @@
+use std::{net::ToSocketAddrs, path::PathBuf};
+
+use anyhow::{Context, Result};
+use axum::http::Uri;
+use serde::{Deserialize, de::DeserializeOwned};
+
+use crate::{Args, utils::check_directory_access};
+
+/// Service configuration
+#[derive(Deserialize)]
+pub struct Config {
+    /// IP-Address (+ port) that the web-service listens on
+    pub ip_addr: String,
+
+    /// Data directory
+    pub data_dir: PathBuf,
+
+    /// Domain, under which the service is reachable
+    /// (important to give out correct pre-signed urls)
+    pub domain: String,
+}
+
+impl Config {
+    /// Initializes the configuration
+    ///
+    /// If the `--config` option is set, the config file is used.
+    /// In case no config-file is specified, the config is parsed via basic cmdline arguments,
+    /// and if those are not present, the config is initialized via environment variables.
+    pub fn init(args: Args) -> Result<Self> {
+        // Try to init configuration in that order:
+        //
+        // 1. Try from config-file
+        // 2. Try from arguments
+        // 3. Try from environment
+        let config = if let Some(config_path) = args.config {
+            let content = std::fs::read_to_string(&config_path).context(format!(
+                "failed to read config file at '{}'",
+                config_path.display()
+            ))?;
+            let config: Config = toml::from_str(&content).context("failed to parse config file")?;
+            config
+        } else if args.ip_addr.is_some() && args.data_dir.is_some() && args.domain.is_some() {
+            Config {
+                ip_addr: args.ip_addr.unwrap(),
+                data_dir: args.data_dir.unwrap(),
+                domain: args.domain.unwrap(),
+            }
+        } else {
+            Config::try_from_env()?
+        };
+
+        // --- Do some sanity checks and parsing
+        check_directory_access(&config.data_dir)?;
+
+        let _socket_addr = config
+            .ip_addr
+            .to_socket_addrs()
+            .context("failed to parse ip-addr")?;
+
+        let _domain: Uri = config
+            .domain
+            .parse()
+            .context("domain is not a proper URI")?;
+
+        Ok(config)
+    }
+
+    fn try_from_env() -> Result<Self> {
+        let ip_addr = get_from_env("IP_ADDR")?;
+        let data_dir = get_from_env("DATA_DIR")?;
+        let domain = get_from_env("DOMAIN")?;
+        Ok(Config {
+            ip_addr,
+            data_dir,
+            domain,
+        })
+    }
+}
+
+/// Helper function to parse a value from the environment
+fn get_from_env<T: DeserializeOwned>(var: &'static str) -> Result<T> {
+    let value_string = std::env::var(var).context(format!("Missing required variable '{var}'"))?;
+    let quoted = format!("'{}'", value_string.trim());
+    let value: toml::Value = quoted.parse()?;
+    Ok(value.try_into()?)
+}

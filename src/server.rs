@@ -1,7 +1,6 @@
 use std::{
     fs::File,
     io::{BufWriter, Write},
-    net::SocketAddr,
     path::PathBuf,
     sync::Arc,
     time::Instant,
@@ -56,12 +55,12 @@ const CHUNK_MERGE: &str = "X-Chunk-Merge";
 /// Entrypoint to start the webserver
 ///
 /// This function basically never returns - it only does in case of an error.
-pub async fn start(addr: SocketAddr, fs_controller: FsController) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+pub async fn start(config: super::Config, fs_controller: FsController) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(config.ip_addr).await?;
 
     let auth = Arc::new(AuthState {
         hmac_secret: (0..255).collect(),
-        domain: "http://127.0.0.1:3000".to_string(),
+        domain: config.domain,
         api_key: "secret-api-key".to_string(),
     });
 
