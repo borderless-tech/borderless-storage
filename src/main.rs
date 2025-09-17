@@ -2,7 +2,8 @@ use std::{net::ToSocketAddrs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing::info;
+use storage::FsController;
+use tracing::{Level, info};
 use utils::check_directory_access;
 
 mod server;
@@ -28,9 +29,13 @@ async fn main() -> Result<()> {
         .next()
         .context("Failed to parse socket address")?;
 
-    tracing_subscriber::fmt::init();
+    let fs_controller = FsController::init(&args.data_dir)?;
+
+    tracing_subscriber::fmt()
+        .with_max_level(Level::DEBUG)
+        .init();
     info!("Initializing webserver on {}...", socket_addr);
 
-    server::start(socket_addr).await?;
+    server::start(socket_addr, fs_controller).await?;
     Ok(())
 }
