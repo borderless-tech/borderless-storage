@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use base64::{Engine, alphabet::URL_SAFE, prelude::BASE64_URL_SAFE};
+use base64::{Engine, prelude::BASE64_URL_SAFE};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
@@ -66,6 +66,7 @@ pub fn generate_presigned_url(
     secret: &[u8],
     expiry_seconds: u64,
 ) -> String {
+    debug_assert!(path.starts_with('/'), "paths must start with a '/'");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
@@ -84,14 +85,15 @@ pub fn verify_presigned_signature(
     sig: &str,
     expires: u64,
     secret: &[u8],
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
+    debug_assert!(path.starts_with('/'), "paths must start with a '/'");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs();
 
     if now > expires {
-        return Err("signature expired");
+        return Err("signature expired".to_string());
     }
 
     let sig_expected = generate_signature(method, path, expires, secret);
@@ -100,11 +102,11 @@ pub fn verify_presigned_signature(
     if subtle::ConstantTimeEq::ct_eq(sig_expected.as_bytes(), sig.as_bytes()).into() {
         Ok(())
     } else {
-        Err("invalid signature")
+        Err("invalid signature".to_string())
     }
 }
 
-// Helper function to generate the signature of a pre-signed url
+/// Helper function to generate the signature of a pre-signed url
 fn generate_signature(method: &str, path: &str, expires: u64, secret: &[u8]) -> String {
     let string_to_sign = format!("{method}|{path}|{expires}");
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC can take key of any size");
@@ -114,8 +116,8 @@ fn generate_signature(method: &str, path: &str, expires: u64, secret: &[u8]) -> 
     sig_encoded
 }
 
-// Helper function to parse the query of a pre-signed url
-fn extract_sig_from_query(query: &str) -> Result<(u64, String), &'static str> {
+/// Helper function to parse the query of a pre-signed url
+pub fn extract_sig_from_query(query: &str) -> Result<(u64, String), String> {
     let mut expires = None;
     let mut signature = None;
     for pat in query.split('&') {
@@ -132,9 +134,11 @@ fn extract_sig_from_query(query: &str) -> Result<(u64, String), &'static str> {
     }
     match (expires, signature) {
         (Some(e), Some(s)) => Ok((e, s.to_string())),
-        (None, Some(_)) => Err("missing field 'expires' in query"),
-        (Some(_), None) => Err("missing field 'sig' in query"),
-        _ => Err("missing fields 'sig' and 'expires' in query"),
+        (None, Some(_)) => Err("pre-signed-url is missing field 'expires' in query".to_string()),
+        (Some(_), None) => Err("pre-signed-url is missing field 'sig' in query".to_string()),
+        _ => {
+            Err("pre-signed-url required! Missing fields 'sig' and 'expires' in query".to_string())
+        }
     }
 }
 

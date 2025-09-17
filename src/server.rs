@@ -3,6 +3,7 @@ use std::{
     io::{BufWriter, Write},
     net::SocketAddr,
     path::PathBuf,
+    sync::Arc,
     time::Instant,
 };
 
@@ -10,20 +11,28 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Request, State},
-    http::{HeaderMap, header::CONTENT_TYPE},
+    http::{
+        HeaderMap,
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        request,
+    },
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures::StreamExt;
 use serde::Serialize;
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use self::error::Error;
-use crate::{storage::FsController, utils::byte_size_str};
+use crate::{
+    storage::FsController,
+    utils::{byte_size_str, extract_sig_from_query, verify_presigned_signature},
+};
 
 /// Http-header to specify the upload type
 const UPLOAD_TYPE: &str = "X-Upload-Type";
@@ -49,23 +58,92 @@ const CHUNK_MERGE: &str = "X-Chunk-Merge";
 pub async fn start(addr: SocketAddr, fs_controller: FsController) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
-    let service = Router::new()
+    let auth = Arc::new(AuthState {
+        hmac_secret: (0..255).collect(),
+        domain: "http://127.0.0.1:3000".to_string(),
+        api_key: "secret-api-key".to_string(),
+    });
+
+    let api_key_protected = Router::new()
+        .route("/presign", post(presign_url))
+        .layer(middleware::from_fn_with_state(
+            auth.clone(),
+            require_api_key_auth,
+        ))
+        .with_state(auth.clone());
+
+    let pre_sign_protected = Router::new()
         .route("/upload/{blob_id}", post(upload_data))
         .route("/files/{blob_id}", get(read_blob))
-        .layer(middleware::from_fn(auth_middleware_dummy))
-        .layer(middleware::from_fn(metrics))
+        .layer(middleware::from_fn_with_state(auth, require_presign_auth))
         .with_state(fs_controller);
+
+    let service = Router::new()
+        .merge(api_key_protected)
+        .merge(pre_sign_protected)
+        .layer(middleware::from_fn(metrics));
 
     axum::serve(listener, service).await?;
 
     Ok(())
 }
 
-/// Dummy authentication middleware ( to be implemented )
-async fn auth_middleware_dummy(request: Request, next: Next) -> Response {
-    // let user_id = UserAuth(12345);
-    // request.extensions_mut().insert(user_id);
-    next.run(request).await
+struct AuthState {
+    /// HMAC Secret
+    hmac_secret: Vec<u8>,
+    /// The domain under which the server is reachable
+    domain: String,
+    /// API-Key to generate pre-signed urls
+    api_key: String,
+}
+
+/// Middleware that checks if the request is authorized with the proper API-key
+async fn require_api_key_auth(
+    State(auth): State<Arc<AuthState>>,
+    req: Request,
+    next: Next,
+) -> Result<impl IntoResponse> {
+    // Parse the authorization header
+    let auth_header = req
+        .headers()
+        .get(AUTHORIZATION)
+        .ok_or_else(|| Error::Unauthorized("missing header 'authorization'".to_string()))?;
+
+    // Parse header value as string
+    let auth_str = auth_header.to_str().map_err(|e| {
+        Error::Unauthorized(format!("Auth-header is not a valid utf-8 string: {e}"))
+    })?;
+
+    // Check if string is "Bearer TOKEN" and return TOKEN
+    let key = auth_str
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| Error::Unauthorized("Auth-header: Expected 'Bearer TOKEN'".to_string()))?;
+
+    // Compare API keys and reject invalid ones
+    // NOTE: We use constant-time equality here to prevent timing attacks on the backend!
+    if auth.api_key.as_bytes().ct_eq(key.as_bytes()).unwrap_u8() != 1 {
+        return Err(Error::Unauthorized("Invalid API-Key".to_string()));
+    }
+
+    Ok(next.run(req).await)
+}
+
+/// Middleware that checks if the request uses a pre-signed-url
+async fn require_presign_auth(
+    State(auth): State<Arc<AuthState>>,
+    req: Request,
+    next: Next,
+) -> Result<impl IntoResponse> {
+    let method = req.method().as_str();
+    let path = req.uri().path();
+    let query = req.uri().query().unwrap_or_default();
+
+    // Extract signature and verify it
+    let (expires, sig) = extract_sig_from_query(query).map_err(Error::Unauthorized)?;
+    verify_presigned_signature(method, path, &sig, expires, &auth.hmac_secret)
+        .map_err(Error::Unauthorized)?; // NOTE: The "?" is important here !
+
+    Ok(next.run(req).await)
 }
 
 /// Metrics middleware
@@ -99,6 +177,8 @@ mod error {
         BrokenStream,
         #[error("file not found")]
         NotFound,
+        #[error("{0}")]
+        Unauthorized(String),
         #[error("failed to parse header values: {0}")]
         Headers(String),
         #[error("failed to build response: {0}")]
@@ -111,6 +191,7 @@ mod error {
         fn into_response(self) -> Response {
             let status = match &self {
                 Error::Io(_) | Error::ResponseFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                Error::Unauthorized(_) => StatusCode::UNAUTHORIZED,
                 _ => StatusCode::BAD_REQUEST,
             };
             let message = self.to_string();
@@ -386,4 +467,13 @@ async fn stream_body_to_file(body: Body, target_path: PathBuf, tmp_path: PathBuf
     writer.flush()?;
     std::fs::rename(&tmp_path, &target_path)?;
     Ok(bytes_written)
+}
+
+struct PresignDto {
+    method: String,
+    path: String,
+}
+
+async fn presign_url(State(auth): State<Arc<AuthState>>) {
+    /* TODO */
 }
