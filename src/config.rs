@@ -95,7 +95,17 @@ impl Config {
 /// Helper function to parse a value from the environment
 fn get_from_env<T: DeserializeOwned>(var: &'static str) -> Result<T> {
     let value_string = std::env::var(var).context(format!("Missing required variable '{var}'"))?;
-    let quoted = format!("'{}'", value_string.trim());
-    let value: toml::Value = quoted.parse()?;
-    Ok(value.try_into()?)
+    // Check, if string is only numbers
+    if value_string
+        .chars()
+        .fold(true, |acc, c| acc && c.is_numeric())
+    {
+        // in this case don't quote
+        let value: toml::Value = value_string.parse()?;
+        Ok(value.try_into()?)
+    } else {
+        let quoted = format!("'{}'", value_string.trim());
+        let value: toml::Value = quoted.parse()?;
+        Ok(value.try_into()?)
+    }
 }

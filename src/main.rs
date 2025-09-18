@@ -9,6 +9,7 @@ use clap::Parser;
 use config::Config;
 use storage::FsController;
 use tracing::{Level, debug, error, info, warn};
+use utils::large_secs_str;
 
 mod config;
 mod server;
@@ -63,7 +64,10 @@ async fn main() -> Result<()> {
     let fs = fs_controller.clone();
     let ttl_orphan_secs = config.ttl_orphan_secs;
     let cleanup_task = tokio::spawn(async move {
-        info!("🪣 Started cleanup task");
+        info!(
+            "🪣 Started cleanup task - orphan timeout {}",
+            large_secs_str(ttl_orphan_secs)
+        );
         loop {
             info!("🧹 Performing cleanup routine...");
             cleanup_routine(fs.clone(), ttl_orphan_secs).await;

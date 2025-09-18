@@ -134,10 +134,12 @@ impl FsController {
         let mut out = Vec::new();
         for file in read_dir(self.base_path.join(FS_DATA_DIR))? {
             let file = file?;
+            tracing::info!("checking {}", file.path().display());
 
             // Check for .tmp extension ( in files )
             if file.path().extension().unwrap_or_default() != "tmp" || !file.file_type()?.is_file()
             {
+                tracing::info!("ignoring {}", file.path().display());
                 continue;
             }
 
@@ -146,7 +148,7 @@ impl FsController {
             let modified = meta.modified()?;
 
             let now = SystemTime::now();
-            if modified.duration_since(now).unwrap_or_default().as_secs() > ttl_orphan_secs {
+            if now.duration_since(modified).unwrap_or_default().as_secs() > ttl_orphan_secs {
                 out.push(file.path());
             }
         }
@@ -163,9 +165,11 @@ impl FsController {
         let mut out = Vec::new();
         'directory: for dir in read_dir(self.base_path.join(FS_CHUNK_DIR))? {
             let dir = dir?;
+            tracing::info!("checking {}", dir.path().display());
 
             // Only check directories
             if !dir.file_type()?.is_dir() {
+                tracing::info!("ignoring {}", dir.path().display());
                 continue;
             }
 
@@ -178,7 +182,7 @@ impl FsController {
                 let modified = meta.modified()?;
 
                 let now = SystemTime::now();
-                if modified.duration_since(now).unwrap_or_default().as_secs() < ttl_orphan_secs {
+                if now.duration_since(modified).unwrap_or_default().as_secs() < ttl_orphan_secs {
                     // Skip to the next directory entry,
                     // as this directory contains at least one file that is not orphaned
                     continue 'directory;

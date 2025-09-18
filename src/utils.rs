@@ -58,6 +58,37 @@ pub fn byte_size_str(bytes: usize) -> String {
     }
 }
 
+/// Pretty prints a large number of seconds
+pub fn large_secs_str(secs: u64) -> String {
+    match secs {
+        0..=60 => format!("{secs}s"),
+        61..3600 => {
+            let min = (secs as f64) / 60.;
+            let secs = secs % 60;
+            let mins = min.floor() as u64;
+            if secs != 0 {
+                format!("{mins}min {secs}s")
+            } else {
+                format!("{mins}min")
+            }
+        }
+        3600..86400 => {
+            let min = (secs as f64) / 60.;
+            let hours = min / 60.;
+            let mins = (min.floor() as u64) % 60;
+            if mins != 0 {
+                format!("{hours}h {mins}min")
+            } else {
+                format!("{hours}h")
+            }
+        }
+        _ => {
+            let days = (secs as f64) / 86400.;
+            format!("~{} days", days.floor() as u64)
+        }
+    }
+}
+
 /// Returns a pre-signed url
 pub fn generate_presigned_url(
     method: &str,
