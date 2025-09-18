@@ -11,7 +11,7 @@ use storage::FsController;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, debug, error, info, warn};
-use utils::large_secs_str;
+use utils::{byte_size_str, large_secs_str};
 
 mod config;
 mod server;
@@ -33,15 +33,19 @@ struct Args {
 
     #[arg(short, long)]
     config: Option<PathBuf>,
+
+    #[arg(short, long, default_value = "false")]
+    verbose: bool,
 }
 
 /*
 * TODOs
-[ ] Request size limits
-[ ] Rate limiting
+[x] Request size limits
+[x] Timeout
+[ ] Request-IDs
 [x] Cleanup service
 
-[ ] Graceful shutdown
+[x] Graceful shutdown
 [ ] Metrics
 [ ] Configurable limits
 *
@@ -59,6 +63,15 @@ async fn main() -> Result<()> {
     info!("📦 Data-Directory: {}", config.data_dir.display());
     info!("🔒 Domain: {}", config.domain);
     info!("🌐 Listening on {}", config.ip_addr);
+    info!(
+        "🌐 Presign-API request size limit: {}",
+        byte_size_str(config.max_presign_rq_size)
+    );
+    info!(
+        "🌐 Data-API request size limit: {}",
+        byte_size_str(config.max_data_rq_size)
+    );
+    info!("🌐 Request-Timeout: {}s", config.rq_timeout_secs);
 
     let fs_controller = FsController::init(&config.data_dir)?;
 

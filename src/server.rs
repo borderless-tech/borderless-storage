@@ -3,7 +3,7 @@ use std::{
     io::{BufWriter, Write},
     path::PathBuf,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
+use tower_http::{limit::RequestBodyLimitLayer, timeout::RequestBodyTimeoutLayer};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -74,18 +75,26 @@ pub async fn start(
             auth.clone(),
             require_api_key_auth,
         ))
+        .layer(RequestBodyLimitLayer::new(config.max_presign_rq_size))
         .with_state(auth.clone());
 
     let pre_sign_protected = Router::new()
         .route("/upload/{blob_id}", post(upload_data))
         .route("/files/{blob_id}", get(read_blob))
         .layer(middleware::from_fn_with_state(auth, require_presign_auth))
+        .layer(RequestBodyLimitLayer::new(config.max_data_rq_size))
         .with_state(fs_controller);
 
     let service = Router::new()
         .merge(api_key_protected)
         .merge(pre_sign_protected)
         .fallback(reject_404) // NOTE: Without the fallback, we would always hit the authorization layer
+        .layer(RequestBodyTimeoutLayer::new(Duration::from_secs(
+            config.rq_timeout_secs,
+        )))
+        .layer(RequestBodyTimeoutLayer::new(Duration::from_secs(
+            config.rq_timeout_secs,
+        )))
         .layer(middleware::from_fn(metrics));
 
     info!("🚀 Launching webserver");

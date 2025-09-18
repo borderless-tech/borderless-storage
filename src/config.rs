@@ -10,6 +10,15 @@ use crate::{Args, utils::check_directory_access};
 /// Default config value for ttl-orphan-secs
 const DEFAULT_TTL_ORPHAN_SECS: u64 = 12 * 60 * 60;
 
+/// Maximum size (in bytes) for data-requests (4GB)
+const DEFAULT_MAX_DATA_RQ_SIZE: usize = 4 * 1024 * 1024 * 1024;
+
+/// Maximum size (in bytes) for presign-requests (100kB)
+const DEFAULT_MAX_PRESIGN_RQ_SIZE: usize = 100 * 1024;
+
+/// Default timeout for incoming http-requests
+const DEFAULT_RQ_TIMEOUT_SECS: u64 = 30;
+
 /// Service configuration
 #[derive(Deserialize)]
 pub struct Config {
@@ -23,10 +32,23 @@ pub struct Config {
     /// (important to give out correct pre-signed urls)
     pub domain: String,
 
+    #[serde(default)]
+    /// Enable verbose logging
+    pub verbose: bool,
+
     /// Time-to-live (in seconds) for `.tmp` files and chunk-directories,
     /// before they are considered orphanaged.
     /// Defaults to `12 * 60 * 60` - which is 12 hours
     pub ttl_orphan_secs: u64,
+
+    /// Maximum size (in bytes) for data-requests
+    pub max_data_rq_size: usize,
+
+    /// Maximum size (in bytes) for presign-requests
+    pub max_presign_rq_size: usize,
+
+    /// Request Timeout in seconds
+    pub rq_timeout_secs: u64,
 }
 
 impl Config {
@@ -41,7 +63,7 @@ impl Config {
         // 1. Try from config-file
         // 2. Try from arguments
         // 3. Try from environment
-        let config = if let Some(config_path) = args.config {
+        let mut config = if let Some(config_path) = args.config {
             info!("⚙ Parsing config from file: {}", config_path.display());
             let content = std::fs::read_to_string(&config_path).context(format!(
                 "failed to read config file at '{}'",
@@ -51,16 +73,23 @@ impl Config {
             config
         } else if args.ip_addr.is_some() && args.data_dir.is_some() && args.domain.is_some() {
             info!("⚙ Parsing config from cmdline arguments");
+            // Not all options are available via cmdline
             Config {
                 ip_addr: args.ip_addr.unwrap(),
                 data_dir: args.data_dir.unwrap(),
                 domain: args.domain.unwrap(),
-                ttl_orphan_secs: DEFAULT_TTL_ORPHAN_SECS, // No option to set this via cmdline
+                verbose: args.verbose,
+                ttl_orphan_secs: DEFAULT_TTL_ORPHAN_SECS,
+                max_data_rq_size: DEFAULT_MAX_DATA_RQ_SIZE,
+                max_presign_rq_size: DEFAULT_MAX_PRESIGN_RQ_SIZE,
+                rq_timeout_secs: DEFAULT_RQ_TIMEOUT_SECS,
             }
         } else {
             info!("⚙ Parsing config from environment variables");
             Config::try_from_env()?
         };
+        // Override verbosity level
+        config.verbose = args.verbose;
 
         // --- Do some sanity checks and parsing
         check_directory_access(&config.data_dir)?;
@@ -83,11 +112,19 @@ impl Config {
         let data_dir = get_from_env("DATA_DIR")?;
         let domain = get_from_env("DOMAIN")?;
         let ttl_orphan_secs = get_from_env("TTL_ORPHAN_SECS").unwrap_or(DEFAULT_TTL_ORPHAN_SECS);
+        let max_data_rq_size = get_from_env("MAX_DATA_RQ_SIZE").unwrap_or(DEFAULT_MAX_DATA_RQ_SIZE);
+        let max_presign_rq_size =
+            get_from_env("MAX_PRESIGN_RQ_SIZE").unwrap_or(DEFAULT_MAX_PRESIGN_RQ_SIZE);
+        let rq_timeout_secs = get_from_env("RQ_TIMEOUT_SECS").unwrap_or(DEFAULT_RQ_TIMEOUT_SECS);
         Ok(Config {
             ip_addr,
             data_dir,
             domain,
+            verbose: false,
             ttl_orphan_secs,
+            max_data_rq_size,
+            max_presign_rq_size,
+            rq_timeout_secs,
         })
     }
 }
