@@ -6,6 +6,7 @@ use std::{
     time::SystemTime,
 };
 
+use tracing::trace;
 use uuid::Uuid;
 
 /// Sub-Directory, where all data is stored to
@@ -134,12 +135,12 @@ impl FsController {
         let mut out = Vec::new();
         for file in read_dir(self.base_path.join(FS_DATA_DIR))? {
             let file = file?;
-            tracing::info!("checking {}", file.path().display());
+            trace!("checking {}", file.path().display());
 
             // Check for .tmp extension ( in files )
             if file.path().extension().unwrap_or_default() != "tmp" || !file.file_type()?.is_file()
             {
-                tracing::info!("ignoring {}", file.path().display());
+                trace!("ignoring {}", file.path().display());
                 continue;
             }
 
@@ -165,11 +166,11 @@ impl FsController {
         let mut out = Vec::new();
         'directory: for dir in read_dir(self.base_path.join(FS_CHUNK_DIR))? {
             let dir = dir?;
-            tracing::info!("checking {}", dir.path().display());
+            trace!("checking {}", dir.path().display());
 
             // Only check directories
             if !dir.file_type()?.is_dir() {
-                tracing::info!("ignoring {}", dir.path().display());
+                trace!("ignoring {}", dir.path().display());
                 continue;
             }
 

@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
         loop {
             info!("🧹 Performing cleanup routine...");
             cleanup_routine(fs.clone(), ttl_orphan_secs).await;
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::time::sleep(Duration::from_secs(2 * ttl_orphan_secs)).await;
         }
     });
 
@@ -81,17 +81,21 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Helper function for the cleanup routine.
+///
+/// Spawns a blocking task for the fs operations and fetched all errors,
+/// since we don't want the cleanup task to return and shutdown.
 async fn cleanup_routine(fs_controller: FsController, ttl_orphan_secs: u64) {
     let blocking = tokio::task::spawn_blocking(move || -> Result<()> {
         let orphaned_files = fs_controller.find_orphaned_tmp_files(ttl_orphan_secs)?;
         for file in &orphaned_files {
-            debug!("-- Removing {}", file.display());
+            debug!("🧹 Removing {}", file.display());
             remove_file(file)?;
         }
 
         let orphaned_dirs = fs_controller.find_orphaned_chunks(ttl_orphan_secs)?;
         for dir in &orphaned_dirs {
-            debug!("-- Removing {}", dir.display());
+            debug!("🧹 Removing {}", dir.display());
             remove_dir_all(dir)?;
         }
         info!(
