@@ -84,6 +84,7 @@ pub async fn start(config: super::Config, fs_controller: FsController) -> anyhow
         .fallback(reject_404) // NOTE: Without the fallback, we would always hit the authorization layer
         .layer(middleware::from_fn(metrics));
 
+    info!("🚀 Launching webserver");
     axum::serve(listener, service).await?;
 
     Ok(())

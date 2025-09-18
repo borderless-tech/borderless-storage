@@ -1,8 +1,9 @@
 use std::{
-    fs::{File, create_dir, create_dir_all, remove_dir_all, remove_file, rename},
+    fs::{File, create_dir, create_dir_all, read_dir, remove_dir_all, remove_file, rename},
     io::{self, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
+    time::SystemTime,
 };
 
 use uuid::Uuid;
@@ -15,7 +16,7 @@ const FS_CHUNK_DIR: &str = "chunks";
 
 /// Controller for filesystem based local storage
 ///
-/// Encapsulates all storage related logic.
+/// Encapsulates all storage related logic, where and how we save the data.
 ///
 /// For now we simply save everything to the disk,
 /// but later more elaborate things can happen here, like connecting to s3 buckets etc.
@@ -121,5 +122,72 @@ impl FsController {
         remove_dir_all(chunk_sub_dir)?;
 
         Ok(bytes_written as usize)
+    }
+
+    /// Walks through the [`FS_DATA_DIR`] to find `.tmp` files that can be deleted
+    ///
+    /// Uses the fs metadata to check the timestamp, when the file was last modified.
+    /// If this is older than the given ttl, we return the path here.
+    ///
+    /// Note: The returned paths all belong to files.
+    pub fn find_orphaned_tmp_files(&self, ttl_orphan_secs: u64) -> Result<Vec<PathBuf>, io::Error> {
+        let mut out = Vec::new();
+        for file in read_dir(self.base_path.join(FS_DATA_DIR))? {
+            let file = file?;
+
+            // Check for .tmp extension ( in files )
+            if file.path().extension().unwrap_or_default() != "tmp" || !file.file_type()?.is_file()
+            {
+                continue;
+            }
+
+            // Check metadata to get the modified timestamp
+            let meta = file.metadata()?;
+            let modified = meta.modified()?;
+
+            let now = SystemTime::now();
+            if modified.duration_since(now).unwrap_or_default().as_secs() > ttl_orphan_secs {
+                out.push(file.path());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Walks through the [`FS_CHUNK_DIR`] to find chunk directories that can be deleted.
+    ///
+    /// Uses the fs metadata to check the timestamp, when the directory and its files were last modified.
+    /// If this is older than [`TTL_OPRHAN_SECS`], we return the path here.
+    ///
+    /// Note: The returned paths all belong to directories.
+    pub fn find_orphaned_chunks(&self, ttl_orphan_secs: u64) -> Result<Vec<PathBuf>, io::Error> {
+        let mut out = Vec::new();
+        'directory: for dir in read_dir(self.base_path.join(FS_CHUNK_DIR))? {
+            let dir = dir?;
+
+            // Only check directories
+            if !dir.file_type()?.is_dir() {
+                continue;
+            }
+
+            // Check all files in the directory
+            for file in read_dir(dir.path())? {
+                let file = file?;
+
+                // Check metadata to get the modified timestamp
+                let meta = file.metadata()?;
+                let modified = meta.modified()?;
+
+                let now = SystemTime::now();
+                if modified.duration_since(now).unwrap_or_default().as_secs() < ttl_orphan_secs {
+                    // Skip to the next directory entry,
+                    // as this directory contains at least one file that is not orphaned
+                    continue 'directory;
+                }
+            }
+            // If we end up here, all files inside the directory are orphaned,
+            // so the directory itself is considered orphaned
+            out.push(dir.path());
+        }
+        Ok(out)
     }
 }
