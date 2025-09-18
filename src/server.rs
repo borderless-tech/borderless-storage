@@ -11,7 +11,7 @@ use axum::{
     body::Body,
     extract::{Path, Request, State},
     http::{
-        HeaderMap, StatusCode,
+        HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CONTENT_TYPE},
     },
     middleware::{self, Next},
@@ -23,7 +23,11 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
-use tower_http::{limit::RequestBodyLimitLayer, timeout::RequestBodyTimeoutLayer};
+use tower_http::{
+    limit::RequestBodyLimitLayer,
+    request_id::{MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
+    timeout::RequestBodyTimeoutLayer,
+};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -89,6 +93,8 @@ pub async fn start(
         .merge(api_key_protected)
         .merge(pre_sign_protected)
         .fallback(reject_404) // NOTE: Without the fallback, we would always hit the authorization layer
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(RqIdGenerator))
         .layer(RequestBodyTimeoutLayer::new(Duration::from_secs(
             config.rq_timeout_secs,
         )))
@@ -104,6 +110,15 @@ pub async fn start(
         })
         .await?;
     Ok(())
+}
+
+#[derive(Clone)]
+struct RqIdGenerator;
+impl MakeRequestId for RqIdGenerator {
+    fn make_request_id<B>(&mut self, _req: &axum::http::Request<B>) -> Option<RequestId> {
+        let s = Uuid::now_v7().to_string();
+        HeaderValue::from_str(&s).ok().map(RequestId::new)
+    }
 }
 
 struct AuthState {
