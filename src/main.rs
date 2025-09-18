@@ -8,6 +8,8 @@ use anyhow::Result;
 use clap::Parser;
 use config::Config;
 use storage::FsController;
+use tokio::signal::unix::{SignalKind, signal};
+use tokio_util::sync::CancellationToken;
 use tracing::{Level, debug, error, info, warn};
 use utils::large_secs_str;
 
@@ -35,13 +37,13 @@ struct Args {
 
 /*
 * TODOs
-Request size limits
-Rate limiting
-Cleanup service
+[ ] Request size limits
+[ ] Rate limiting
+[x] Cleanup service
 
-Graceful shutdown
-Metrics
-Configurable limits
+[ ] Graceful shutdown
+[ ] Metrics
+[ ] Configurable limits
 *
 */
 
@@ -60,6 +62,9 @@ async fn main() -> Result<()> {
 
     let fs_controller = FsController::init(&config.data_dir)?;
 
+    // --- Create shutdown token
+    let shutdown_token = CancellationToken::new();
+
     // Start cleanup task
     let fs = fs_controller.clone();
     let ttl_orphan_secs = config.ttl_orphan_secs;
@@ -75,7 +80,11 @@ async fn main() -> Result<()> {
         }
     });
 
-    server::start(config, fs_controller).await?;
+    // Spawn a detached ctrl+c handler
+    tokio::spawn(signal_handler(shutdown_token.clone()));
+
+    server::start(config, fs_controller, shutdown_token).await?;
+
     // If the server returns, we can abort the cleanup task
     cleanup_task.abort();
     Ok(())
@@ -110,4 +119,21 @@ async fn cleanup_routine(fs_controller: FsController, ttl_orphan_secs: u64) {
         Ok(Err(e)) => warn!("🧹 Error while executing cleanup routine: {e}"),
         Err(e) => error!("❌ Error while waiting for cleanup task: {e}"),
     }
+}
+
+async fn signal_handler(shutdown_token: CancellationToken) {
+    let mut sigterm =
+        signal(SignalKind::terminate()).expect("failed to register interrupt handler for SIGTERM");
+    let mut sigint =
+        signal(SignalKind::interrupt()).expect("failed to register interrupt handler for SIGINT");
+
+    tokio::select! {
+        _ = sigterm.recv() => {
+            info!("🪦 Termination signal received (SIGTERM), gracefully shutting down.");
+        }
+        _ = sigint.recv() => {
+            info!("⛔ Interrupt received (SIGINT), gracefully shutting down.");
+        }
+    }
+    shutdown_token.cancel();
 }

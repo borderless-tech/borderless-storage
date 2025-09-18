@@ -22,7 +22,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
-use tokio_util::io::ReaderStream;
+use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -55,7 +55,11 @@ const CHUNK_MERGE: &str = "X-Chunk-Merge";
 /// Entrypoint to start the webserver
 ///
 /// This function basically never returns - it only does in case of an error.
-pub async fn start(config: super::Config, fs_controller: FsController) -> anyhow::Result<()> {
+pub async fn start(
+    config: super::Config,
+    fs_controller: FsController,
+    shutdown_token: CancellationToken,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(config.ip_addr).await?;
 
     let auth = Arc::new(AuthState {
@@ -85,8 +89,11 @@ pub async fn start(config: super::Config, fs_controller: FsController) -> anyhow
         .layer(middleware::from_fn(metrics));
 
     info!("🚀 Launching webserver");
-    axum::serve(listener, service).await?;
-
+    axum::serve(listener, service)
+        .with_graceful_shutdown(async move {
+            shutdown_token.cancelled().await;
+        })
+        .await?;
     Ok(())
 }
 
