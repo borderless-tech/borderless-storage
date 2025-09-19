@@ -1,3 +1,111 @@
+//! # Borderless-Storage
+//!
+//! Simple and easy to use storage solution to store binary blobs in an s3-like fashion.
+//!
+//! ## 🗺️ Architecture Overview
+//!
+//! ```text
+//! +-------------------------------+         +---------------------------+
+//! |          HTTP Server          |  ---->  |      FsController         |
+//! |  (Axum/Tokio, pre-sign check) |         |  /data
+//! |                               |         |   ├─ full/   (final objs) |
+//! | - verifies pre-signed URLs    |         |   └─ chunks/ (per-UUID)   |
+//! | - streams uploads/downloads   |         +---------------------------+
+//! | - merges chunks when complete |
+//! +-------------------------------+
+//!               │
+//!               ├── background task: cleans orphaned temp files & chunks
+//!               │
+//!               └── shutdown token: graceful stop on SIGINT/SIGTERM
+//! ```
+//!
+//! ### Storage layout
+//!
+//! * `<DATA_DIR>/full/` — final, complete blobs; filename = `<uuid>`
+//! * `<DATA_DIR>/full/<uuid>.tmp` — in‑progress single‑part upload temp file
+//! * `<DATA_DIR>/chunks/<uuid>/chunk_{idx}_{total}` — chunked upload parts
+//!
+//! When all chunks are present, the server merges them into a single file under `full/` and deletes the `chunks/<uuid>/` directory.
+//!
+//! The janitor periodically deletes:
+//!
+//! * old `*.tmp` files in `full/` if `last_modified` > `TTL_ORPHAN_SECS`
+//! * entire `chunks/<uuid>/` directories if **all** files inside are older than the TTL
+//!
+//! ---
+//!
+//! ## 🔐 Pre‑signed URLs
+//!
+//! Pre‑signed URLs are of the form:
+//!
+//! ```text
+//! {domain}{path}?expires={unix_seconds}&sig={base64url_hmac}
+//! ```
+//!
+//! The string to sign is:
+//!
+//! ```text
+//! {METHOD}|{PATH}|{EXPIRES}
+//! ```
+//!
+//! HMAC‑SHA256 over that string (with your secret bytes) is Base64 URL‑safe encoded.
+//!
+//! The server verifies:
+//!
+//! * `expires` is in the future
+//! * the signature matches (constant‑time compare)
+//! * method and path match the ones signed
+//!
+//! ### Utility functions (available in this repo)
+//!
+//! The `src/utils.rs` exposes helpers you can reuse:
+//!
+//! * `generate_presigned_url(method, domain, path, secret, expiry_seconds) -> String`
+//! * `extract_sig_from_query(query) -> Result<(expires, sig), String>`
+//! * `verify_presigned_signature(method, path, sig, expires, secret) -> Result<(), String>`
+//!
+//! > See unit tests in `src/utils.rs` for round‑trip samples and expiry checks.
+//!
+//! ---
+//! ## 🧩 API Shape (High‑Level)
+//!
+//! This project follows an S3‑style flow with **pre‑signed operations**. While the concrete routes may evolve, the intended patterns are:
+//!
+//! * **Single‑part upload**
+//!
+//!   * Client obtains a pre‑signed `PUT` URL for a target object path (e.g., `/objects/{uuid}`)
+//!   * Client `PUT`s bytes to that URL within `expires`
+//!   * Server writes to `<uuid>.tmp` then atomically renames to `<uuid>`
+//!
+//! * **Chunked (multi‑part) upload**
+//!
+//!   * Client obtains N pre‑signed `PUT` URLs for `/objects/{uuid}/chunks/{idx}/{total}`
+//!   * Upload each chunk independently
+//!   * Server merges when all parts are present
+//!
+//! * **Download**
+//!
+//!   * Client obtains a pre‑signed `GET` URL for `/objects/{uuid}` and downloads the blob
+//!
+//! All pre‑signed requests include `?expires=...&sig=...` and are validated server‑side.
+//!
+//! ---
+//!
+//! ## 🧹 Cleanup Task
+//!
+//! * Starts automatically at boot
+//! * Logs: `🪣 Started cleanup task - orphan timeout …`
+//! * Runs a cleanup cycle every `2 * ttl_orphan_secs`
+//! * Removes orphaned temp files and stale chunk directories
+//! * Runs filesystem work in a blocking thread to avoid starving the async runtime
+//!
+//! ---
+//!
+//! ## 🛑 Shutdown
+//!
+//! * Catches `SIGTERM` and `SIGINT` and **gracefully** cancels the server via a `CancellationToken`
+//! * The janitor task is aborted once the server exits
+
 use std::{
     fs::{remove_dir_all, remove_file},
     path::PathBuf,

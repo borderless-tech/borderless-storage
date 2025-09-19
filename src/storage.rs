@@ -100,7 +100,7 @@ impl FsController {
 
     /// Merges all chunks into a single file
     ///
-    /// Note: Callers must ensure, that all chunks are present - see [`check_chunks`].
+    /// Note: Callers must ensure, that all chunks are present - see [`FsController::check_chunks`].
     pub fn merge_chunks(&self, blob_id: &Uuid, chunk_total: usize) -> Result<usize, io::Error> {
         let chunk_sub_dir = self.base_path.join(FS_CHUNK_DIR).join(blob_id.to_string());
         let (final_path, final_tmp) = self.blob_path(blob_id);
@@ -159,7 +159,7 @@ impl FsController {
     /// Walks through the [`FS_CHUNK_DIR`] to find chunk directories that can be deleted.
     ///
     /// Uses the fs metadata to check the timestamp, when the directory and its files were last modified.
-    /// If this is older than [`TTL_OPRHAN_SECS`], we return the path here.
+    /// If this is older than `ttl_orphan_secs`, we return the path here.
     ///
     /// Note: The returned paths all belong to directories.
     pub fn find_orphaned_chunks(&self, ttl_orphan_secs: u64) -> Result<Vec<PathBuf>, io::Error> {
