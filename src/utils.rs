@@ -143,8 +143,8 @@ fn generate_signature(method: &str, path: &str, expires: u64, secret: &[u8]) -> 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC can take key of any size");
     mac.update(string_to_sign.as_bytes());
     let signature = mac.finalize().into_bytes();
-    let sig_encoded = BASE64_URL_SAFE.encode(&signature);
-    sig_encoded
+    
+    BASE64_URL_SAFE.encode(signature)
 }
 
 /// Helper function to parse the query of a pre-signed url
@@ -154,8 +154,7 @@ pub fn extract_sig_from_query(query: &str) -> Result<(u64, String), String> {
     for pat in query.split('&') {
         if let Some(expiry) = pat.strip_prefix("expires=") {
             let val = expiry
-                .parse::<u64>()
-                .or_else(|_| Err("failed to parse field 'expires'"))?;
+                .parse::<u64>().map_err(|_| "failed to parse field 'expires'")?;
             expires = Some(val);
         } else if let Some(sig) = pat.strip_prefix("sig=") {
             signature = Some(sig);

@@ -127,7 +127,7 @@ fn get_from_env<T: DeserializeOwned>(var: &'static str) -> Result<T> {
     // Check, if string is only numbers
     if value_string
         .chars()
-        .fold(true, |acc, c| acc && c.is_numeric())
+        .all(|c| c.is_numeric())
     {
         // in this case don't quote
         let value: toml::Value = value_string.parse()?;

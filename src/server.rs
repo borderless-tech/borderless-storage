@@ -568,7 +568,7 @@ async fn presign_url(
     let expires_in = presign.expires_in.unwrap_or(60 * 15); // 15 minutes default
     let (method, path, blob_id) = match presign.action {
         PresignAction::Upload => {
-            let blob_id = presign.blob_id.unwrap_or_else(|| Uuid::now_v7());
+            let blob_id = presign.blob_id.unwrap_or_else(Uuid::now_v7);
             ("POST", format!("/upload/{blob_id}"), blob_id)
         }
         PresignAction::Download => {
