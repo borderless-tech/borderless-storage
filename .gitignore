@@ -2,3 +2,4 @@
 db
 .direnv
 tarpaulin-report.html
+result
