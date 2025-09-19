@@ -2,6 +2,25 @@
 name = "borderless-storage"
 version = "0.1.0"
 edition = "2024"
+description = "A minimal S3-style object store with pre-signed URLs, chunked uploads, and a filesystem backend (based on Axum/Tokio)."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["storage", "s3", "object-store", "axum", "tokio"]
+categories = ["filesystem", "asynchronous", "network-programming", "web-programming::http-server"]
+repository = "https://github.com/borderless/borderless-storage"
+homepage = "https://github.com/borderless/borderless-storage"
+documentation = "https://docs.rs/borderless-storage"
+
+# Keep the published crate tidy (omit CI files, .vscode, etc.)
+# If you intend to publish only the library helpers, you can also switch to `include = [...]`.
+exclude = [
+  "db/*",
+  ".github/*",
+  ".vscode/*",
+  ".direnv/*",
+  "docker/*",
+  "tarpaulin-report.html",
+]
 
 [dependencies]
 anyhow = "1.0.99"
@@ -29,3 +48,11 @@ tempfile = "3.22.0"
 parking_lot = "0.12.4"
 tower = "0.5.2"
 url = "2.5.7"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+strip = "symbols"
+opt-level = 3
+debug = false
+incremental = false

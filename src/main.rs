@@ -146,7 +146,6 @@ struct Args {
 }
 
 #[tokio::main]
-#[cfg(not(tarpaulin_include))]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
