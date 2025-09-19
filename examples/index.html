@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>borderless-storage — API Tester</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0b1220; --panel:#121a2b; --accent:#7dd3fc; --text:#e5e7eb; --muted:#9ca3af; }
+    body { margin:0; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial; background:var(--bg); color:var(--text); }
+    .wrap { max-width: 920px; margin: 40px auto; padding: 0 16px; }
+    h1 { font-size: 22px; margin: 0 0 16px; }
+    .card { background: var(--panel); border: 1px solid #1f2a44; border-radius: 14px; padding: 16px; margin: 14px 0; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+    label { display:block; margin: 8px 0 4px; color: var(--muted); }
+    input[type="text"], input[type="number"] { width: 100%; box-sizing: border-box; background: #0f172a; border: 1px solid #1f2a44; color: var(--text); padding: 10px 12px; border-radius: 10px; }
+    input[type="file"] { margin-top: 6px; }
+    .row { display:flex; gap: 12px; }
+    .row > * { flex: 1; }
+    button { background: #0ea5e9; color: #001019; border: none; padding: 10px 14px; border-radius: 10px; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #334155; color: #cbd5e1; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .muted { color: var(--muted); }
+    .prog { height: 10px; background: #0f172a; border-radius: 30px; overflow: hidden; border: 1px solid #1f2a44; margin-top: 8px; }
+    .bar { height: 100%; width: 0%; background: linear-gradient(90deg, #38bdf8, #22d3ee); transition: width .15s ease-out; }
+    .kbd { display:inline-block; padding: 2px 6px; border-radius:6px; background:#0f172a; border:1px solid #1f2a44; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .grid-2 { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 820px){ .grid-2{ grid-template-columns: 1fr; } .row { flex-direction: column; } }
+    .log { white-space: pre-wrap; background:#0a1020; border:1px solid #1f2a44; padding:10px; border-radius:10px; max-height: 280px; overflow:auto; }
+    .pill { display:inline-flex; align-items:center; gap:8px; background:#0f172a; border:1px solid #1f2a44; padding:6px 10px; border-radius:999px; }
+    .pill code { color:#a5b4fc; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>borderless-storage — API Tester</h1>
+
+    <div class="card">
+      <div class="grid-2">
+        <div>
+          <label>Service Base URL (no trailing slash)</label>
+          <input id="baseUrl" type="text" placeholder="http://localhost:8080" value="http://localhost:8080" />
+        </div>
+        <div>
+          <label>Presign API Key <span class="muted">(for <span class="kbd">/presign</span>)</span></label>
+          <input id="apiKey" type="text" placeholder="changeme" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <button id="btnPing" class="secondary" title="Calls /presign with a dry-run upload to confirm connectivity & auth">Ping /presign</button>
+        <div class="pill"><span>Blob ID:</span> <code id="currentBlob">—</code> <button id="copyBlob" class="secondary" style="padding:6px 10px;">Copy</button></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin:0 0 8px;">Upload</h2>
+      <div class="grid-2">
+        <div>
+          <label>Select file</label>
+          <input id="fileInput" type="file" />
+        </div>
+        <div>
+          <label>Upload mode</label>
+          <div class="row">
+            <button id="btnUploadFull">Upload (full)</button>
+            <button id="btnUploadChunked" class="secondary">Upload (chunked)</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top:12px;">
+        <div>
+          <label>Chunk size (MiB, only for chunked)</label>
+          <input id="chunkSize" type="number" min="1" step="1" value="5" />
+        </div>
+        <div>
+          <label>Presign expiry (seconds)</label>
+          <input id="expires" type="number" min="30" step="30" value="900" />
+        </div>
+      </div>
+
+      <div class="prog"><div id="uploadBar" class="bar"></div></div>
+      <div class="muted" id="uploadStatus">Idle.</div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin:0 0 8px;">Download</h2>
+      <div class="row">
+        <input id="downloadBlobId" type="text" placeholder="UUID (v4/v7) to download" />
+        <button id="btnDownload">Get pre-signed & download</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin:0 0 8px;">Logs</h2>
+      <div id="log" class="log"></div>
+    </div>
+  </div>
+
+  <script>
+    // -------------------------
+    // Small helpers
+    // -------------------------
+    const $ = sel => document.querySelector(sel);
+    const logEl = $('#log');
+    function log(msg, obj) {
+      const ts = new Date().toISOString().replace('T',' ').replace('Z','');
+      if (obj !== undefined) {
+        logEl.textContent += `[${ts}] ${msg}\n` + JSON.stringify(obj, null, 2) + "\n";
+      } else {
+        logEl.textContent += `[${ts}] ${msg}\n`;
+      }
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function setBlob(id) {
+      $('#currentBlob').textContent = id || '—';
+      $('#downloadBlobId').value = id || '';
+    }
+    function setProgress(f) {
+      $('#uploadBar').style.width = `${Math.max(0, Math.min(100, f*100)).toFixed(1)}%`;
+    }
+    function setStatus(s) {
+      $('#uploadStatus').textContent = s;
+    }
+    function reqHeaders(base, key) {
+      if (!base) throw new Error('Base URL is required');
+      if (!key) throw new Error('API key is required for /presign');
+      return { base, key };
+    }
+    function assertOk(res) {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res;
+    }
+
+    // -------------------------
+    // /presign client
+    // -------------------------
+    async function presignUpload(base, key, expires, blobId /*optional*/) {
+      const body = {
+        action: 'upload',
+        expires_in: Number(expires) || 900
+      };
+      if (blobId) body.blob_id = blobId;
+
+      const res = await fetch(`${base}/presign`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'authorization': `Bearer ${key}`,
+        },
+        body: JSON.stringify(body),
+      }).then(assertOk);
+      const json = await res.json();
+      console.log(json);
+      if (!json?.success) throw new Error(json?.message || 'presign upload failed');
+      return json; // {success, action, blob_id, url, method, expires_in}
+    }
+
+    async function presignDownload(base, key, expires, blobId) {
+      if (!blobId) throw new Error('Blob ID is required for download');
+      const body = {
+        action: 'download',
+        blob_id: blobId,
+        expires_in: Number(expires) || 900,
+      };
+      const res = await fetch(`${base}/presign`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'authorization': `Bearer ${key}`,
+        },
+        body: JSON.stringify(body),
+      }).then(assertOk);
+      const json = await res.json();
+      if (!json?.success) throw new Error(json?.message || 'presign download failed');
+      return json; // { url, method: "GET" }
+    }
+
+    // -------------------------
+    // Upload implementations
+    // -------------------------
+    async function uploadFull(file, base, key, expires) {
+      const pre = await presignUpload(base, key, expires, /*blobId*/ null);
+      setBlob(pre.blob_id);
+      log('Pre-signed upload URL acquired', pre);
+
+      const controller = new AbortController();
+      let loaded = 0;
+      setProgress(0);
+      setStatus('Uploading (full)…');
+
+      // We use X-Upload-Type: full (optional for server, but explicit)
+      const res = await fetch(pre.url, {
+        method: 'POST', // server minted "POST"
+        headers: {
+          'content-type': 'application/octet-stream',
+          'X-Upload-Type': 'full',
+        },
+        body: file,
+        signal: controller.signal,
+      });
+
+      // There isn't a built-in per-chunk progress for fetch body uploads.
+      // For test purposes, we mark as complete when finished.
+      if (!res.ok) {
+        const txt = await res.text().catch(()=> '');
+        throw new Error(`Upload failed: HTTP ${res.status} ${txt}`);
+      }
+      setProgress(1);
+      setStatus('Upload complete.');
+      const json = await res.json().catch(()=> ({}));
+      log('Full upload response', json);
+      return pre.blob_id;
+    }
+
+    async function uploadChunked(file, base, key, expires, chunkMiB) {
+      const pre = await presignUpload(base, key, expires, /*blobId*/ null);
+      setBlob(pre.blob_id);
+      log('Pre-signed upload URL acquired', pre);
+
+      const chunkSize = (Number(chunkMiB) || 5) * 1024 * 1024;
+      const total = Math.max(1, Math.ceil(file.size / chunkSize));
+      setStatus(`Uploading in ${total} chunks of ~${chunkMiB} MiB…`);
+      setProgress(0);
+
+      const uploadOne = async (idx) => {
+        const start = (idx - 1) * chunkSize;
+        const end = Math.min(start + chunkSize, file.size);
+        const blob = file.slice(start, end);
+        const res = await fetch(pre.url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/octet-stream',
+            'X-Upload-Type': 'chunked',
+            'X-Chunk-Index': String(idx),
+            'X-Chunk-Total': String(total),
+          },
+          body: blob,
+        });
+        if (!res.ok) {
+          const txt = await res.text().catch(()=> '');
+          throw new Error(`Chunk ${idx}/${total} failed: HTTP ${res.status} ${txt}`);
+        }
+        // Update progress after each chunk
+        setProgress(idx / total);
+      };
+
+      for (let i = 1; i <= total; i++) {
+        await uploadOne(i);
+      }
+
+      // Merge request (no body), just headers
+      const mergeRes = await fetch(pre.url, {
+        method: 'POST',
+        headers: {
+          'X-Upload-Type': 'chunked',
+          'X-Chunk-Total': String(total),
+          'X-Chunk-Merge': '1',
+        },
+      });
+      if (!mergeRes.ok) {
+        const txt = await mergeRes.text().catch(()=> '');
+        throw new Error(`Merge failed: HTTP ${mergeRes.status} ${txt}`);
+      }
+      const mergeJson = await mergeRes.json().catch(()=> ({}));
+      log('Merge response', mergeJson);
+      setStatus('Chunked upload complete.');
+      setProgress(1);
+
+      return pre.blob_id;
+    }
+
+    // -------------------------
+    // Download
+    // -------------------------
+    async function downloadBlob(base, key, expires, blobId) {
+      const pre = await presignDownload(base, key, expires, blobId);
+      log('Pre-signed download URL acquired', pre);
+
+      const res = await fetch(pre.url, { method: 'GET' });
+      if (!res.ok) {
+        const txt = await res.text().catch(()=> '');
+        throw new Error(`Download failed: HTTP ${res.status} ${txt}`);
+      }
+      const buf = await res.blob();
+      const a = document.createElement('a');
+      const url = URL.createObjectURL(buf);
+      a.href = url;
+      // fallback filename
+      a.download = blobId + ".bin";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      log(`Downloaded ${buf.size} bytes for blob ${blobId}`);
+    }
+
+    // -------------------------
+    // Wire up UI
+    // -------------------------
+    $('#btnPing').addEventListener('click', async () => {
+      try {
+        const { base, key } = reqHeaders($('#baseUrl').value.trim(), $('#apiKey').value.trim());
+        const res = await presignUpload(base, key, Number($('#expires').value) || 900, null);
+        setBlob(res.blob_id);
+        log('Ping OK (presign upload)', res);
+      } catch (e) {
+        log('Ping failed: ' + e.message);
+        alert('Ping failed: ' + e.message);
+      }
+    });
+
+    $('#copyBlob').addEventListener('click', async () => {
+      const id = $('#currentBlob').textContent.trim();
+      if (!id || id === '—') return;
+      await navigator.clipboard.writeText(id).catch(()=>{});
+    });
+
+    $('#btnUploadFull').addEventListener('click', async () => {
+      const file = $('#fileInput').files?.[0];
+      if (!file) return alert('Pick a file first.');
+      try {
+        disableUploads(true);
+        const blobId = await uploadFull(file, $('#baseUrl').value.trim(), $('#apiKey').value.trim(), Number($('#expires').value));
+        log(`Full upload done. blob_id=${blobId}`);
+      } catch (e) {
+        log('Upload failed: ' + e.message);
+        alert('Upload failed: ' + e.message);
+      } finally {
+        disableUploads(false);
+      }
+    });
+
+    $('#btnUploadChunked').addEventListener('click', async () => {
+      const file = $('#fileInput').files?.[0];
+      if (!file) return alert('Pick a file first.');
+      try {
+        disableUploads(true);
+        const blobId = await uploadChunked(file, $('#baseUrl').value.trim(), $('#apiKey').value.trim(), Number($('#expires').value), Number($('#chunkSize').value));
+        log(`Chunked upload done. blob_id=${blobId}`);
+      } catch (e) {
+        log('Chunked upload failed: ' + e.message);
+        alert('Chunked upload failed: ' + e.message);
+      } finally {
+        disableUploads(false);
+      }
+    });
+
+    $('#btnDownload').addEventListener('click', async () => {
+      const blobId = $('#downloadBlobId').value.trim();
+      if (!blobId) return alert('Enter a blob ID to download.');
+      try {
+        await downloadBlob($('#baseUrl').value.trim(), $('#apiKey').value.trim(), Number($('#expires').value), blobId);
+      } catch (e) {
+        log('Download failed: ' + e.message);
+        alert('Download failed: ' + e.message);
+      }
+    });
+
+    function disableUploads(disabled) {
+      $('#btnUploadFull').disabled = disabled;
+      $('#btnUploadChunked').disabled = disabled;
+      $('#fileInput').disabled = disabled;
+    }
+
+    // Init
+    setProgress(0);
+    setStatus('Idle.');
+    log('Ready. Configure base URL and API key, then pick a file and upload.');
+  </script>
+</body>
+</html>
