@@ -21,7 +21,7 @@ persists data on the local filesystem, and includes an automatic janitor for cle
 
 ## 🚀 Quickstart
 
-You can use the `run.sh` to run the service locally in develop mode. See section [building](#manual-build), deploying and [configuration](#configuration) for more advanced options.
+You can use the `run.sh` to run the service locally in develop mode. See section [building](#manual-build), deploying and [configuration](#required-settings) for more advanced options.
 
 The actions are similar to s3, so before you can upload or download anything, you have to generate a presigned url via the `/presign` endpoint.
 Assuming you have your server locally available, it would look something like this:

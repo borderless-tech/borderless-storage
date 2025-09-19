@@ -2,7 +2,7 @@
 
 To configure the service, you have different options, which all use the same config-keys:
 
-## Config-File `config.toml`
+### Config-File `config.toml`
 
 One option is to use a config-file in `.toml` format, which looks like this:
 
