@@ -5,6 +5,7 @@ ip_addr = "0.0.0.0:8080"
 data_dir = "/var/lib/storage"
 domain = "https://storage.example.com"
 presign_api_key = "super-secret-key"
+cors_origins = "https://www.example.com, https://api.example.com"
 
 # - If not provided, the service will generate a secret upon start
 presign_hmac_secret = "DFiqt36ecTMw3TxGYrlYvkD2kXE6mQvf"

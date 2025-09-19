@@ -90,9 +90,9 @@ This is done via the same upload endpoint, but using special request headers to 
 
 ``` shell
 curl -X POST "http://localhost:3000/upload/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
-    -H "X-Upload-Type: chunked" \ 
-    -H "X-Chunk-Index: 1" \ 
-    -H "X-Chunk-Total: 3" \ 
+    -H "x-upload-type: chunked" \ 
+    -H "x-chunk-index: 1" \ 
+    -H "x-chunk-total: 3" \ 
     --data-binary @File-Chunk_1_3
 ```
 
@@ -100,9 +100,9 @@ After all chunks are uploaded, a last request advises the server to perform the 
 
 ``` shell
 curl -X POST "http://localhost:3000/upload/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
-    -H "X-Upload-Type: chunked" \ 
-    -H "X-Chunk-Merge: true" \ 
-    -H "X-Chunk-Total: 3"
+    -H "x-upload-type: chunked" \ 
+    -H "x-chunk-merge: true" \ 
+    -H "x-chunk-total: 3"
 ```
 
 You can then download the file like normal.
@@ -194,6 +194,7 @@ You can configure borderless-storage via **(1) config file**, **(2) CLI flags**,
 | `domain`              | `DOMAIN`              | — (required)           | Parsed as `http::Uri`              |
 | `presign_api_key`     | `PRESIGN_API_KEY`     | — (required)           | Use a secure API-Key in production |
 | `presign_hmac_secret` | `PRESIGN_HMAC_SECRET` | generate random secret | Use a secure secret in production  |
+| `cors_origins`        | `CORS_ORIGINS`        | all origins ('\*')     | Comma separated list of origins    |
 | `ttl_orphan_secs`     | `TTL_ORPHAN_SECS`     | `43200` (12h)          | Orphan TTL for temp files/chunks   |
 | `max_data_rq_size`    | `MAX_DATA_RQ_SIZE`    | `4 * 1024^3` (4 GiB)   | Hard cap for data API requests     |
 | `max_presign_rq_size` | `MAX_PRESIGN_RQ_SIZE` | `100 * 1024` (100 KiB) | Hard cap for pre‑sign endpoints    |

@@ -11,7 +11,7 @@ use axum::{
     body::Body,
     extract::{Path, Request, State},
     http::{
-        HeaderMap, StatusCode,
+        HeaderMap, HeaderName, Method, StatusCode,
         header::{AUTHORIZATION, CONTENT_TYPE},
     },
     middleware::{self, Next},
@@ -24,6 +24,7 @@ use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tower_http::{
+    cors::CorsLayer,
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
     timeout::{RequestBodyTimeoutLayer, TimeoutLayer},
@@ -43,7 +44,7 @@ use crate::{
 use super::Config;
 
 /// Http-header to specify the upload type
-const UPLOAD_TYPE: &str = "X-Upload-Type";
+const UPLOAD_TYPE: &str = "x-upload-type";
 
 /// Http-header value that indicates a 'full' upload (all bytes in one request)
 const UPLOAD_TYPE_FULL: &str = "full";
@@ -52,13 +53,13 @@ const UPLOAD_TYPE_FULL: &str = "full";
 const UPLOAD_TYPE_CHUNK: &str = "chunked";
 
 /// Http-header to specify the chunk-index
-const CHUNK_IDX: &str = "X-Chunk-Index";
+const CHUNK_IDX: &str = "x-chunk-index";
 
 /// Http-header to specify the total amount of chunks
-const CHUNK_TOTAL: &str = "X-Chunk-Total";
+const CHUNK_TOTAL: &str = "x-chunk-total";
 
 /// Http-header that is used in the last request of a chunk upload to advice the server to merge the chunks
-const CHUNK_MERGE: &str = "X-Chunk-Merge";
+const CHUNK_MERGE: &str = "x-chunk-merge";
 
 /// Entrypoint to start the webserver
 ///
@@ -110,6 +111,45 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
                 .latency_unit(tower_http::LatencyUnit::Micros),
         );
 
+    // In debug mode, always allow all cors headers
+
+    #[cfg(debug_assertions)]
+    let allowed_origins = {
+        info!("🌐 Debug-Build: Allowing all cors origins");
+        tower_http::cors::Any
+    };
+    #[cfg(not(debug_assertions))]
+    let allowed_origins = {
+        if let Some(origins) = config.cors_origins {
+            let out = tower_http::cors::AllowOrigin::list(
+                origins.split(',').flat_map(|s| s.parse().ok()),
+            );
+            for value in origins.split(',') {
+                info!("🌐 Allowing cors origin '{value}'");
+            }
+            out
+        } else {
+            warn!(
+                "🌐 No allowed cors origins specified ! Defaulting to any '*' - this is not recommended in production setups!"
+            );
+            tower_http::cors::AllowOrigin::any()
+        }
+    };
+
+    let cors = CorsLayer::new()
+        .allow_origin(allowed_origins)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            HeaderName::from_static(UPLOAD_TYPE),
+            HeaderName::from_static(CHUNK_IDX),
+            HeaderName::from_static(CHUNK_TOTAL),
+            HeaderName::from_static(CHUNK_MERGE),
+        ])
+        // Optional: cache preflight for a day
+        .max_age(std::time::Duration::from_secs(24 * 60 * 60));
+
     let hmac_secret = if let Some(s) = config.presign_hmac_secret {
         s.into_bytes()
     } else {
@@ -160,6 +200,7 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
         .merge(api_key_protected)
         .merge(pre_sign_protected)
         .fallback(reject_404) // NOTE: Without the fallback, we would always hit the authorization layer
+        .layer(cors)
         .layer(tracing_layer)
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -359,7 +400,7 @@ impl UploadType {
                 return Ok(UploadType::Full);
             } else {
                 return Err(Error::Headers(format!(
-                    "require header X-Upload-Type to be either '{UPLOAD_TYPE_FULL}' or '{UPLOAD_TYPE_CHUNK}'"
+                    "require header {UPLOAD_TYPE} to be either '{UPLOAD_TYPE_FULL}' or '{UPLOAD_TYPE_CHUNK}'"
                 )));
             }
         }
@@ -639,6 +680,7 @@ mod tests {
                 domain: domain.to_string(),
                 presign_api_key: api_key.to_string(),
                 presign_hmac_secret: Some(String::from_utf8_lossy(secret).to_string()),
+                cors_origins: None,
                 ttl_orphan_secs: 1234,
                 max_data_rq_size: max_data,
                 max_presign_rq_size: max_presign,

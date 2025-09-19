@@ -42,6 +42,11 @@ pub struct Config {
     /// you should provide a fixed secret. And please ensure you used enough entropy (usually 256 bit).
     pub presign_hmac_secret: Option<String>,
 
+    /// Comma separated list of allowed origins for CORS.
+    ///
+    /// Is ignored in debug builds. Leave empty to allow all origins (not recommended in production!)
+    pub cors_origins: Option<String>,
+
     /// Time-to-live (in seconds) for `.tmp` files and chunk-directories,
     /// before they are considered orphanaged.
     /// Defaults to `12 * 60 * 60` - which is 12 hours
@@ -90,6 +95,7 @@ impl Config {
                 domain: args.domain.unwrap(),
                 presign_api_key: args.presign_api_key.unwrap(),
                 presign_hmac_secret: None,
+                cors_origins: None,
                 ttl_orphan_secs: DEFAULT_TTL_ORPHAN_SECS,
                 max_data_rq_size: DEFAULT_MAX_DATA_RQ_SIZE,
                 max_presign_rq_size: DEFAULT_MAX_PRESIGN_RQ_SIZE,
@@ -113,6 +119,12 @@ impl Config {
             .parse()
             .context("domain is not a proper URI")?;
 
+        if let Some(cors_origins) = &config.cors_origins {
+            for origin in cors_origins.split(',') {
+                let _: Uri = origin.parse().context("cors origin is not a proper URI")?;
+            }
+        }
+
         Ok(config)
     }
 
@@ -127,12 +139,14 @@ impl Config {
         let max_presign_rq_size =
             get_from_env("MAX_PRESIGN_RQ_SIZE").unwrap_or(DEFAULT_MAX_PRESIGN_RQ_SIZE);
         let rq_timeout_secs = get_from_env("RQ_TIMEOUT_SECS").unwrap_or(DEFAULT_RQ_TIMEOUT_SECS);
+        let cors_origins = get_from_env("CORS_ORIGINS").ok(); // default is 'None'
         Ok(Config {
             ip_addr,
             data_dir,
             domain,
             presign_api_key,
             presign_hmac_secret,
+            cors_origins,
             ttl_orphan_secs,
             max_data_rq_size,
             max_presign_rq_size,
