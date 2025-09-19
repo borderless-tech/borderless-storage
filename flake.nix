@@ -46,45 +46,27 @@
             name = "borderless/${pname}";
             tag = version;
 
-            # Include the compiled package and CA certs (good practice if you ever call out)
+            # Include the compiled package and CA certs
             contents = [
               borderlessPkg
-              pkgs.ca-certificates
+              pkgs.cacert
             ];
-
-            # Create a small /bin with a stable path to the binary and a writable /data dir
-            extraCommands = ''
-              mkdir -p bin data
-              ln -s ${borderlessPkg}/bin/borderless-storage /bin/borderless-storage
-              # ensure /data is writable by default container user (uid 0); adjust if you run as non-root
-              chmod 0777 /data
-            '';
 
             # Docker image configuration
             config = {
-              # default port; change if you prefer a different listen port
               ExposedPorts = { "8080/tcp" = {}; };
-
-              Env = [
-                "RUST_LOG=info"
-                # you can set defaults here, but generally pass via docker run -e:
-                # "IP_ADDR=0.0.0.0:8080"
-                # "DATA_DIR=/data"
-                # "DOMAIN=http://localhost:8080"
-                # "PRESIGN_API_KEY=changeme"
-              ];
-
               WorkingDir = "/";
 
               # Entrypoint/Cmd: keep simple so env vars are easy to inject at runtime
-              Entrypoint = [ "/bin/borderless-storage" ];
-              # optional arguments at container start, typically none
+              Entrypoint = [ "${borderlessPkg}/bin/borderless-storage" ];
               Cmd = [ ];
+
+              # Data volume
+              Volumes = { "/data" = {}; };
+              Env = [ "DATA_DIR=/data" ];
             };
 
-            # Useful labels
-            # (shown by `docker inspect`; helps provenance)
-            # You can add org.opencontainers.image.* too.
+            # labels
             created = "now";
           };
       in
