@@ -40,6 +40,8 @@ use crate::{
     },
 };
 
+use super::Config;
+
 /// Http-header to specify the upload type
 const UPLOAD_TYPE: &str = "X-Upload-Type";
 
@@ -62,12 +64,24 @@ const CHUNK_MERGE: &str = "X-Chunk-Merge";
 ///
 /// This function basically never returns - it only does in case of an error.
 pub async fn start(
-    config: super::Config,
+    config: Config,
     fs_controller: FsController,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(config.ip_addr).await?;
+    let listener = TcpListener::bind(&config.ip_addr).await?;
 
+    let service = build_service(config, fs_controller);
+
+    info!("🚀 Launching webserver");
+    axum::serve(listener, service)
+        .with_graceful_shutdown(async move {
+            shutdown_token.cancelled().await;
+        })
+        .await?;
+    Ok(())
+}
+
+fn build_service(config: Config, fs_controller: FsController) -> Router {
     // --- Initialize tracing layer
     //
     // NOTE: If we would use 'include_headers(true)' - then we need this layer aswell, to now show the bearer token in the log
@@ -142,7 +156,7 @@ pub async fn start(
     //            |
     //            v
     //         responses
-    let service = Router::new()
+    Router::new()
         .merge(api_key_protected)
         .merge(pre_sign_protected)
         .fallback(reject_404) // NOTE: Without the fallback, we would always hit the authorization layer
@@ -154,15 +168,7 @@ pub async fn start(
         )))
         .layer(RequestBodyTimeoutLayer::new(Duration::from_secs(
             config.rq_timeout_secs,
-        )));
-
-    info!("🚀 Launching webserver");
-    axum::serve(listener, service)
-        .with_graceful_shutdown(async move {
-            shutdown_token.cancelled().await;
-        })
-        .await?;
-    Ok(())
+        )))
 }
 
 struct AuthState {
@@ -600,4 +606,367 @@ async fn presign_url(
         expires_in,
     };
     Ok(Json(res))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request as HttpRequest, StatusCode},
+    };
+    use serde_json::Value;
+    use tempfile::{TempDir, tempdir};
+    use tower::ServiceExt; // for .oneshot
+    use uuid::Uuid;
+
+    /// Build a minimal app (Router) matching the real server wiring,
+    /// but without binding a socket. This lets us do in-memory HTTP tests.
+    fn build_test_app(
+        domain: &str,
+        api_key: &str,
+        secret: &[u8],
+        max_presign: usize,
+        max_data: usize,
+        rq_timeout_secs: u64,
+    ) -> (axum::Router, TempDir) {
+        let dir = tempdir().unwrap();
+        let fs = FsController::init(dir.path()).unwrap();
+        let service = build_service(
+            Config {
+                ip_addr: "127.0.0.1:3000".to_string(),
+                data_dir: "foo".into(),
+                domain: domain.to_string(),
+                presign_api_key: api_key.to_string(),
+                presign_hmac_secret: Some(String::from_utf8_lossy(secret).to_string()),
+                ttl_orphan_secs: 1234,
+                max_data_rq_size: max_data,
+                max_presign_rq_size: max_presign,
+                rq_timeout_secs,
+            },
+            fs,
+        );
+        (service, dir)
+    }
+
+    /// Helper to parse JSON body from a response.
+    async fn json_body(resp: axum::response::Response) -> Value {
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            panic!(
+                "expected JSON (status {status}), got: {:?} / parse err: {e}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+        v
+    }
+
+    #[tokio::test]
+    async fn presign_requires_api_key_and_works_with_valid_key() {
+        let domain = "https://example.test";
+        let api_key = "super-secret";
+        let secret = b"test-hmac-secret-32-bytes-----------";
+
+        let (app, _guard) =
+            build_test_app(domain, api_key, secret, 100 * 1024, 10 * 1024 * 1024, 5);
+
+        // 1) Missing Authorization -> 401 JSON error
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/presign")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{ "action":"upload" }"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 2) Wrong key -> 401
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/presign")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer nope")
+            .body(Body::from(r#"{ "action":"upload" }"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 3) Correct key -> 200 and returns url/method/blob_id
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/presign")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {api_key}"))
+            .body(Body::from(r#"{ "action":"upload" }"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json_body(resp).await;
+
+        assert_eq!(v["success"], true);
+        assert_eq!(v["action"], "upload");
+        assert_eq!(v["method"], "POST");
+        let url = v["url"].as_str().expect("url string");
+        assert!(
+            url.starts_with(domain),
+            "url should be minted using configured domain"
+        );
+        assert!(
+            url.contains("?expires=") && url.contains("&sig="),
+            "pre-signed URL should include expires & sig"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_upload_and_download_roundtrip() {
+        let domain = "https://example.test";
+        let api_key = "k";
+        let secret = b"another-test-secret--------------------------------";
+
+        let (app, _guard) =
+            build_test_app(domain, api_key, secret, 100 * 1024, 10 * 1024 * 1024, 10);
+
+        // Create our own pre-signed upload URL (same algorithm/secret as server)
+        let blob_id = Uuid::new_v4();
+        let path = format!("/upload/{blob_id}");
+        let url = crate::utils::generate_presigned_url("POST", domain, &path, secret, 300);
+        let u = url::Url::parse(&url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        // Do the upload
+        let body_bytes = b"hello axum storage";
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(&body_bytes[..]))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["success"], true);
+        assert_eq!(v["blob_id"].as_str().unwrap(), blob_id.to_string());
+
+        // Pre-sign a GET and download
+        let get_path = format!("/files/{blob_id}");
+        let get_url = crate::utils::generate_presigned_url("GET", domain, &get_path, secret, 300);
+        let u = url::Url::parse(&get_url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("{get_path}?{query}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&bytes[..], &body_bytes[..], "downloaded content matches");
+    }
+
+    #[tokio::test]
+    async fn chunked_upload_then_merge() {
+        let domain = "https://example.test";
+        let api_key = "k";
+        let secret = b"chunk-secret---------------------------------------";
+        let (app, _guard) =
+            build_test_app(domain, api_key, secret, 100 * 1024, 10 * 1024 * 1024, 10);
+
+        let blob_id = Uuid::new_v4();
+        // Upload 2 chunks
+        let total = 2usize;
+
+        for (idx, data) in [(1usize, b"hello "), (2, b"world!")].into_iter() {
+            let path = format!("/upload/{blob_id}");
+            let url = crate::utils::generate_presigned_url("POST", domain, &path, secret, 300);
+            let u = url::Url::parse(&url).unwrap();
+            let query = u.query().unwrap_or("");
+
+            let req = HttpRequest::builder()
+                .method("POST")
+                .uri(format!("{path}?{query}"))
+                .header(super::UPLOAD_TYPE, super::UPLOAD_TYPE_CHUNK)
+                .header(super::CHUNK_IDX, idx.to_string())
+                .header(super::CHUNK_TOTAL, total.to_string())
+                .body(Body::from(&data[..]))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "chunk {idx} should upload");
+        }
+
+        // Merge request (no body), just headers
+        let path = format!("/upload/{blob_id}");
+        let url = crate::utils::generate_presigned_url("POST", domain, &path, secret, 300);
+        let u = url::Url::parse(&url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .header(super::UPLOAD_TYPE, super::UPLOAD_TYPE_CHUNK)
+            .header(super::CHUNK_TOTAL, total.to_string())
+            .header(super::CHUNK_MERGE, "1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["success"], true);
+        assert_eq!(v["message"], format!("merged {} chunks", total));
+        assert_eq!(v["bytes_written"].as_u64().unwrap(), 12u64);
+
+        // Download and confirm content
+        let get_path = format!("/files/{blob_id}");
+        let get_url = crate::utils::generate_presigned_url("GET", domain, &get_path, secret, 300);
+        let u = url::Url::parse(&get_url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("{get_path}?{query}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&bytes[..], b"hello world!");
+    }
+
+    #[tokio::test]
+    async fn merge_reports_missing_chunks() {
+        let domain = "https://example.test";
+        let api_key = "k";
+        let secret = b"missing-secret-------------------------------------";
+        let (app, _guard) =
+            build_test_app(domain, api_key, secret, 100 * 1024, 10 * 1024 * 1024, 10);
+
+        let blob_id = Uuid::new_v4();
+        let total = 3usize;
+
+        // Upload only chunk 2/3
+        let path = format!("/upload/{blob_id}");
+        let url = crate::utils::generate_presigned_url("POST", domain, &path, secret, 300);
+        let u = url::Url::parse(&url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .header(super::UPLOAD_TYPE, super::UPLOAD_TYPE_CHUNK)
+            .header(super::CHUNK_IDX, "2")
+            .header(super::CHUNK_TOTAL, total.to_string())
+            .body(Body::from("middle"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Ask to merge -> expect success:false + missing list
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .header(super::UPLOAD_TYPE, super::UPLOAD_TYPE_CHUNK)
+            .header(super::CHUNK_TOTAL, total.to_string())
+            .header(super::CHUNK_MERGE, "1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["success"], false);
+
+        let missing: Vec<u64> = serde_json::from_value(v["missing_chunks"].clone()).unwrap();
+        assert_eq!(missing, vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn invalid_headers_and_duplicate_are_handled() {
+        let domain = "https://example.test";
+        let api_key = "k";
+        let secret = b"invalid-headers-secret------------------------------";
+        let (app, _guard) =
+            build_test_app(domain, api_key, secret, 100 * 1024, 10 * 1024 * 1024, 10);
+
+        let blob_id = Uuid::new_v4();
+        let path = format!("/upload/{blob_id}");
+        let url = crate::utils::generate_presigned_url("POST", domain, &path, secret, 300);
+        let u = url::Url::parse(&url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        // 1) Bad X-Upload-Type value -> 400
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .header(super::UPLOAD_TYPE, "weird")
+            .body(Body::from("ignored"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // 2) Full upload succeeds
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .header(super::UPLOAD_TYPE, super::UPLOAD_TYPE_FULL)
+            .body(Body::from("abc"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 3) Duplicate upload -> 400 Duplicate
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .header(super::UPLOAD_TYPE, super::UPLOAD_TYPE_FULL)
+            .body(Body::from("abc"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = json_body(resp).await;
+        assert_eq!(v["success"], false);
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("duplicate")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_signature_is_rejected_by_middleware() {
+        let domain = "https://example.test";
+        let api_key = "k";
+        let secret = b"valid-secret----------------------------------------";
+        let (app, _guard) =
+            build_test_app(domain, api_key, secret, 100 * 1024, 10 * 1024 * 1024, 10);
+
+        // Sign with a WRONG secret
+        let blob_id = Uuid::new_v4();
+        let path = format!("/upload/{blob_id}");
+        let bad_url =
+            crate::utils::generate_presigned_url("POST", domain, &path, b"WRONG-SECRET", 300);
+        let u = url::Url::parse(&bad_url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .header(super::UPLOAD_TYPE, super::UPLOAD_TYPE_FULL)
+            .body(Body::from("data"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let v = json_body(resp).await;
+        assert_eq!(v["success"], false);
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("invalid")
+        );
+    }
 }
