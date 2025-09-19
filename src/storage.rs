@@ -6,7 +6,7 @@ use std::{
     time::SystemTime,
 };
 
-use tracing::trace;
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 /// Sub-Directory, where all data is stored to
@@ -197,11 +197,42 @@ impl FsController {
     }
 }
 
+/// Helper function for the cleanup routine.
+///
+/// Spawns a blocking task for the fs operations and fetched all errors,
+/// since we don't want the cleanup task to return and shutdown.
+pub async fn cleanup_routine(fs_controller: FsController, ttl_orphan_secs: u64) {
+    let blocking = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let orphaned_files = fs_controller.find_orphaned_tmp_files(ttl_orphan_secs)?;
+        for file in &orphaned_files {
+            debug!("🧹 Removing {}", file.display());
+            remove_file(file)?;
+        }
+
+        let orphaned_dirs = fs_controller.find_orphaned_chunks(ttl_orphan_secs)?;
+        for dir in &orphaned_dirs {
+            debug!("🧹 Removing {}", dir.display());
+            remove_dir_all(dir)?;
+        }
+        info!(
+            "🧹 Removed {} orphaned files and {} orphaned chunk directories",
+            orphaned_files.len(),
+            orphaned_dirs.len()
+        );
+        Ok(())
+    });
+    match blocking.await {
+        Ok(Ok(())) => (),
+        Ok(Err(e)) => warn!("🧹 Error while executing cleanup routine: {e}"),
+        Err(e) => error!("❌ Error while waiting for cleanup task: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, io::Read, thread::sleep, time::Duration};
 
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
     use super::*;
 
@@ -393,5 +424,89 @@ mod tests {
             none.is_empty(),
             "no chunk dirs should be orphaned with huge ttl"
         );
+    }
+
+    // Build a minimal FsController on a temp dir
+    fn make_fs() -> (FsController, TempDir) {
+        let dir = tempdir().expect("tempdir");
+        // Create the base structure via FsController::init
+        (FsController::init(dir.path()).expect("init fs"), dir)
+    }
+
+    /// Create a normal (non-tmp) blob and a tmp blob in `full/`, plus a chunk dir
+    /// with files; return their paths for assertions.
+    fn seed_files(fs: &FsController) -> (PathBuf, PathBuf, PathBuf) {
+        let id_full = Uuid::new_v4();
+        let id_tmp = Uuid::new_v4();
+        let id_chunks = Uuid::new_v4();
+
+        // Normal blob
+        let (full_path, _full_tmp) = fs.blob_path(&id_full);
+        {
+            let mut f = File::create(&full_path).expect("create full file");
+            f.write_all(b"live").unwrap();
+        }
+
+        // .tmp blob
+        let (_tmp_final, tmp_path) = fs.blob_path(&id_tmp);
+        {
+            let mut f = File::create(&tmp_path).expect("create tmp file");
+            f.write_all(b"tmp").unwrap();
+        }
+
+        // Chunk dir with two files
+        let (c1, _t1) = fs.chunk_path(&id_chunks, 1, 2).expect("chunk path 1");
+        let (c2, _t2) = fs.chunk_path(&id_chunks, 2, 2).expect("chunk path 2");
+        File::create(&c1).unwrap();
+        File::create(&c2).unwrap();
+
+        // Return: normal file path, tmp file path, chunk subdir path
+        let chunk_subdir = fs
+            .clone()
+            .base_path
+            .join("chunks")
+            .join(id_chunks.to_string());
+        (full_path, tmp_path, chunk_subdir)
+    }
+
+    #[tokio::test]
+    async fn cleanup_routine_removes_orphans_with_ttl_0() {
+        let (fs, _guard) = make_fs();
+        let (full_path, tmp_path, chunk_subdir) = seed_files(&fs);
+
+        // Ensure mtime is at least 1s old so ttl=0 will catch them
+        sleep(Duration::from_secs(1));
+
+        // Run cleanup with ttl=0 (anything older than now)
+        cleanup_routine(fs.clone(), 0).await;
+
+        // .tmp should be gone
+        assert!(
+            !tmp_path.exists(),
+            "orphan .tmp should be deleted by cleanup"
+        );
+        // chunk dir should be gone
+        assert!(
+            !chunk_subdir.exists(),
+            "orphan chunk directory should be deleted"
+        );
+        // normal file should remain
+        assert!(full_path.exists(), "non-tmp full blob should remain");
+    }
+
+    #[tokio::test]
+    async fn cleanup_routine_respects_large_ttl_keeps_recent() {
+        let (fs, _guard) = make_fs();
+        let (full_path, tmp_path, chunk_subdir) = seed_files(&fs);
+
+        // Run cleanup with a huge TTL so nothing counts as orphaned yet
+        cleanup_routine(fs.clone(), u64::MAX / 2).await;
+
+        assert!(tmp_path.exists(), "recent tmp should not be deleted");
+        assert!(
+            chunk_subdir.exists(),
+            "recent chunk dir should not be deleted"
+        );
+        assert!(full_path.exists(), "normal file should remain");
     }
 }

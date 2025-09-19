@@ -27,6 +27,7 @@
             })
             rustc
             cargo
+            cargo-tarpaulin
           ];
 
           # Certain Rust tools won't work without this

@@ -456,4 +456,29 @@ rq_timeout_secs = 30
         let ip: String = super::get_from_env("IP_ADDR").expect("parse stringy");
         assert_eq!(ip, "127.0.0.1:8080");
     }
+
+    #[test]
+    fn args_parsing_via_clap() {
+        use clap::Parser;
+        // Simulate: binary name and CLI args
+        let fake = [
+            "bin",
+            "--data-dir",
+            "/tmp/data",
+            "--ip-addr",
+            "0.0.0.0:8080",
+            "--domain",
+            "https://example.test",
+            "--presign-api-key",
+            "abc123",
+            "--verbose",
+        ];
+        // Clap will parse into our Args struct
+        let args = crate::Args::try_parse_from(&fake).expect("parse args");
+        assert_eq!(args.data_dir.unwrap(), PathBuf::from("/tmp/data"));
+        assert_eq!(args.ip_addr.as_deref(), Some("0.0.0.0:8080"));
+        assert_eq!(args.domain.as_deref(), Some("https://example.test"));
+        assert_eq!(args.presign_api_key.as_deref(), Some("abc123"));
+        assert!(args.verbose);
+    }
 }

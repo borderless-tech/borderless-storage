@@ -143,7 +143,7 @@ fn generate_signature(method: &str, path: &str, expires: u64, secret: &[u8]) -> 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC can take key of any size");
     mac.update(string_to_sign.as_bytes());
     let signature = mac.finalize().into_bytes();
-    
+
     BASE64_URL_SAFE.encode(signature)
 }
 
@@ -154,7 +154,8 @@ pub fn extract_sig_from_query(query: &str) -> Result<(u64, String), String> {
     for pat in query.split('&') {
         if let Some(expiry) = pat.strip_prefix("expires=") {
             let val = expiry
-                .parse::<u64>().map_err(|_| "failed to parse field 'expires'")?;
+                .parse::<u64>()
+                .map_err(|_| "failed to parse field 'expires'")?;
             expires = Some(val);
         } else if let Some(sig) = pat.strip_prefix("sig=") {
             signature = Some(sig);
@@ -267,5 +268,71 @@ mod tests {
         let v = verify_presigned_signature(method, path, &sig, expires, &secret);
         assert!(v.is_err());
         Ok(())
+    }
+
+    #[test]
+    fn broken_query() -> Result<()> {
+        assert!(
+            extract_sig_from_query("expires=1234").is_err(),
+            "missing sig"
+        );
+        assert!(
+            extract_sig_from_query("sig=aeaeaeae").is_err(),
+            "missing exp"
+        );
+        assert!(extract_sig_from_query("").is_err(), "missing both");
+        Ok(())
+    }
+
+    // NOTE: These two are AI generated, as the tests are quite useless, but the function drastically reduce test coverage..
+    #[test]
+    fn byte_size_str_boundaries_and_units() {
+        // Bytes
+        assert_eq!(byte_size_str(0), "0 B");
+        assert_eq!(byte_size_str(1), "1 B");
+        assert_eq!(byte_size_str(1023), "1023 B");
+
+        // KB (1 decimal place)
+        assert_eq!(byte_size_str(1024), "1.0 KB");
+        assert_eq!(byte_size_str(2048), "2.0 KB");
+        assert_eq!(byte_size_str(10 * 1024), "10.0 KB");
+
+        // MB (1 decimal place)
+        assert_eq!(byte_size_str(1_048_576), "1.0 MB"); // 1024^2
+        assert_eq!(byte_size_str(2 * 1_048_576), "2.0 MB");
+
+        // GB (2 decimals)
+        assert_eq!(byte_size_str(1_073_741_824), "1.00 GB"); // 1024^3
+        assert_eq!(byte_size_str(3 * 1_073_741_824), "3.00 GB");
+
+        // TB (3 decimals)
+        assert_eq!(byte_size_str(1_099_511_627_776), "1.000 TB"); // 1024^4
+
+        // PB (width-padded integer format in current implementation)
+        // Note: The function uses `format!("{:4} PB", value_in_pb)`, which pads with spaces.
+        // This asserts current behavior explicitly to guard against accidental regressions.
+        assert_eq!(byte_size_str(1_125_899_906_842_624), "   1 PB"); // 1024^5
+        assert_eq!(byte_size_str(2 * 1_125_899_906_842_624), "   2 PB");
+    }
+
+    #[test]
+    fn large_secs_str_boundaries_and_readable_output() {
+        // Seconds range
+        assert_eq!(large_secs_str(0), "0s");
+        assert_eq!(large_secs_str(42), "42s");
+        assert_eq!(large_secs_str(60), "60s");
+
+        // Minutes range
+        assert_eq!(large_secs_str(61), "1min 1s");
+        assert_eq!(large_secs_str(120), "2min");
+        assert_eq!(large_secs_str(3599), "59min 59s");
+
+        // Hours range (choose values where mins == 0 to avoid fractional hours formatting)
+        assert_eq!(large_secs_str(3600), "1h");
+        assert_eq!(large_secs_str(7200), "2h");
+
+        // Days range (floors to whole days with ~ prefix)
+        assert_eq!(large_secs_str(86_400), "~1 days");
+        assert_eq!(large_secs_str(172_800), "~2 days");
     }
 }

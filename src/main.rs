@@ -106,19 +106,15 @@
 //! * Catches `SIGTERM` and `SIGINT` and **gracefully** cancels the server via a `CancellationToken`
 //! * The janitor task is aborted once the server exits
 
-use std::{
-    fs::{remove_dir_all, remove_file},
-    path::PathBuf,
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
 use config::Config;
-use storage::FsController;
+use storage::{FsController, cleanup_routine};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
-use tracing::{Level, debug, error, info, warn};
+use tracing::{Level, info};
 use utils::{byte_size_str, large_secs_str};
 
 mod config;
@@ -150,6 +146,7 @@ struct Args {
 }
 
 #[tokio::main]
+#[cfg(not(tarpaulin_include))]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -203,37 +200,6 @@ async fn main() -> Result<()> {
     // If the server returns, we can abort the cleanup task
     cleanup_task.abort();
     Ok(())
-}
-
-/// Helper function for the cleanup routine.
-///
-/// Spawns a blocking task for the fs operations and fetched all errors,
-/// since we don't want the cleanup task to return and shutdown.
-async fn cleanup_routine(fs_controller: FsController, ttl_orphan_secs: u64) {
-    let blocking = tokio::task::spawn_blocking(move || -> Result<()> {
-        let orphaned_files = fs_controller.find_orphaned_tmp_files(ttl_orphan_secs)?;
-        for file in &orphaned_files {
-            debug!("🧹 Removing {}", file.display());
-            remove_file(file)?;
-        }
-
-        let orphaned_dirs = fs_controller.find_orphaned_chunks(ttl_orphan_secs)?;
-        for dir in &orphaned_dirs {
-            debug!("🧹 Removing {}", dir.display());
-            remove_dir_all(dir)?;
-        }
-        info!(
-            "🧹 Removed {} orphaned files and {} orphaned chunk directories",
-            orphaned_files.len(),
-            orphaned_dirs.len()
-        );
-        Ok(())
-    });
-    match blocking.await {
-        Ok(Ok(())) => (),
-        Ok(Err(e)) => warn!("🧹 Error while executing cleanup routine: {e}"),
-        Err(e) => error!("❌ Error while waiting for cleanup task: {e}"),
-    }
 }
 
 async fn signal_handler(shutdown_token: CancellationToken) {
