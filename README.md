@@ -109,9 +109,47 @@ You can then download the file like normal.
 
 ## 🏗 Build & Deploy
 
+You have several options of how do build and deploy this project. We use [nix](https://nixos.org/) as our build system.
+
+To get a development shell with all required dependencies:
+``` shell
+nix-shell
+# or (if you have flakes enabled)
+nix develop
+```
+
+To build the application natively with nix ( requires flakes )
+``` shell
+nix build .#borderless-storage
+```
+
+### Docker
+
+You can also build a minimal docker image based on nix ( requires flakes to be enabled ):
+
+``` shell
+nix build .#docker
+# This creates a ./result symlink, which you can use to load the image into docker
+docker load < result
+```
+
+The service is exposed under port 8080 inside the docker container. 
+You can execute it via docker like this:
+
+``` shell
+docker run --rm -p 8080:8080 \
+    -e DOMAIN="http://localhost:8080" \
+    -e PRESIGN_API_KEY="secret-api-key" \
+    -e PRESIGN_HMAC_SECRET="your-very-long-and-secret-hmac-secret"  \
+    -v "$PWD/data:/data" \
+    borderless/borderless-storage:0.1.0
+```
+
+Note: You don't have to specify `IP_ADDR` and `DATA_DIR`, as they are fixed inside the container.
+
 ### Manual build
 
-You can build this project manually like any rust project:
+You can build this project manually like any rust project.
 
 #### Prerequisites
 

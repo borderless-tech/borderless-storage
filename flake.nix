@@ -40,7 +40,7 @@
               mainProgram = "borderless-storage";
             };
           };
- # Build a Docker image that contains only the runtime closure for the binary
+        # Build a Docker image that contains only the runtime closure for the binary
         dockerImage =
           pkgs.dockerTools.buildLayeredImage {
             name = "borderless/${pname}";
@@ -54,16 +54,21 @@
 
             # Docker image configuration
             config = {
-              ExposedPorts = { "8080/tcp" = {}; };
               WorkingDir = "/";
+              ExposedPorts = { "8080/tcp" = {}; };
+
+              # Data volume - must be mounted at runtime
+              Volumes = { "/data" = {}; };
+
+              # The data directory and the port are fixed inside the container
+              Env = [
+                "DATA_DIR=/data"
+                "IP_ADDR=127.0.0.1:8080"
+              ];
 
               # Entrypoint/Cmd: keep simple so env vars are easy to inject at runtime
               Entrypoint = [ "${borderlessPkg}/bin/borderless-storage" ];
               Cmd = [ ];
-
-              # Data volume
-              Volumes = { "/data" = {}; };
-              Env = [ "DATA_DIR=/data" ];
             };
 
             # labels
