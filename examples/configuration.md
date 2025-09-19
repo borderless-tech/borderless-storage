@@ -10,6 +10,8 @@ One option is to use a config-file in `.toml` format, which looks like this:
 ip_addr = "0.0.0.0:8080"
 data_dir = "/var/lib/storage"
 domain = "https://storage.example.com"
+presign_api_key = "I5642qehwRMNDIBEtthjbzWN4uFDdzf6"
+presign_hmac_secret = "9RKNSeGVA9F2agDgEkOqzra3EUs320trMkTRMx1AdJ4BE7AoTpzpkPNE0FU9D2yN"
 ttl_orphan_secs = 43200
 max_data_rq_size = 4294967296     # 4 GiB
 max_presign_rq_size = 102400      # 100 KiB
@@ -30,6 +32,7 @@ borderless-storage \
   --ip-addr 0.0.0.0:8080 \
   --data-dir /var/lib/storage \
   --domain https://storage.example.com \
+  --presign-api-key I5642qehwRMNDIBEtthjbzWN4uFDdzf6 \
   --verbose
 ```
 
@@ -46,7 +49,9 @@ The keys are identical to the config file, but must be all uppercase. If a value
 export IP_ADDR=0.0.0.0:8080
 export DATA_DIR=/var/lib/storage
 export DOMAIN=https://storage.example.com
+export PRESIGN_API_KEY="I5642qehwRMNDIBEtthjbzWN4uFDdzf6"
 # -- optional
+export PRESIGN_HMAC_SECRET="9RKNSeGVA9F2agDgEkOqzra3EUs320trMkTRMx1AdJ4BE7AoTpzpkPNE0FU9D2yN"
 export TTL_ORPHAN_SECS=43200
 export MAX_DATA_RQ_SIZE=4294967296
 export MAX_PRESIGN_RQ_SIZE=102400

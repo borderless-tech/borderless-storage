@@ -32,6 +32,16 @@ pub struct Config {
     /// (important to give out correct pre-signed urls)
     pub domain: String,
 
+    /// API-Key used to authenticate the presign endpoint
+    pub presign_api_key: String,
+
+    /// Secret used to generate the presigned URLs
+    ///
+    /// If empty, the server generates a random secret upon start.
+    /// However, if your presigned urls should also be valid after service restarts,
+    /// you should provide a fixed secret. And please ensure you used enough entropy (usually 256 bit).
+    pub presign_hmac_secret: Option<String>,
+
     /// Time-to-live (in seconds) for `.tmp` files and chunk-directories,
     /// before they are considered orphanaged.
     /// Defaults to `12 * 60 * 60` - which is 12 hours
@@ -67,13 +77,19 @@ impl Config {
             ))?;
             let config: Config = toml::from_str(&content).context("failed to parse config file")?;
             config
-        } else if args.ip_addr.is_some() && args.data_dir.is_some() && args.domain.is_some() {
+        } else if args.ip_addr.is_some()
+            && args.data_dir.is_some()
+            && args.domain.is_some()
+            && args.presign_api_key.is_some()
+        {
             info!("⚙ Parsing config from cmdline arguments");
             // Not all options are available via cmdline
             Config {
                 ip_addr: args.ip_addr.unwrap(),
                 data_dir: args.data_dir.unwrap(),
                 domain: args.domain.unwrap(),
+                presign_api_key: args.presign_api_key.unwrap(),
+                presign_hmac_secret: None,
                 ttl_orphan_secs: DEFAULT_TTL_ORPHAN_SECS,
                 max_data_rq_size: DEFAULT_MAX_DATA_RQ_SIZE,
                 max_presign_rq_size: DEFAULT_MAX_PRESIGN_RQ_SIZE,
@@ -104,6 +120,8 @@ impl Config {
         let ip_addr = get_from_env("IP_ADDR")?;
         let data_dir = get_from_env("DATA_DIR")?;
         let domain = get_from_env("DOMAIN")?;
+        let presign_api_key = get_from_env("PRESIGN_API_KEY")?;
+        let presign_hmac_secret = get_from_env("PRESIGN_HMAC_SECRET").ok(); // default is 'None'
         let ttl_orphan_secs = get_from_env("TTL_ORPHAN_SECS").unwrap_or(DEFAULT_TTL_ORPHAN_SECS);
         let max_data_rq_size = get_from_env("MAX_DATA_RQ_SIZE").unwrap_or(DEFAULT_MAX_DATA_RQ_SIZE);
         let max_presign_rq_size =
@@ -113,6 +131,8 @@ impl Config {
             ip_addr,
             data_dir,
             domain,
+            presign_api_key,
+            presign_hmac_secret,
             ttl_orphan_secs,
             max_data_rq_size,
             max_presign_rq_size,
@@ -125,10 +145,7 @@ impl Config {
 fn get_from_env<T: DeserializeOwned>(var: &'static str) -> Result<T> {
     let value_string = std::env::var(var).context(format!("Missing required variable '{var}'"))?;
     // Check, if string is only numbers
-    if value_string
-        .chars()
-        .all(|c| c.is_numeric())
-    {
+    if value_string.chars().all(|c| c.is_numeric()) {
         // in this case don't quote
         let value: toml::Value = value_string.parse()?;
         Ok(value.try_into()?)

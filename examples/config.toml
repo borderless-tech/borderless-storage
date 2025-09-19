@@ -1,8 +1,15 @@
-# Example configuration file
+# --- Example configuration file
 # 
+# - Base configuration
 ip_addr = "0.0.0.0:8080"
 data_dir = "/var/lib/storage"
 domain = "https://storage.example.com"
+presign_api_key = "super-secret-key"
+
+# - If not provided, the service will generate a secret upon start
+presign_hmac_secret = "DFiqt36ecTMw3TxGYrlYvkD2kXE6mQvf"
+
+# - Service Fine-tuning (you can leave the defaults here in most cases)
 ttl_orphan_secs = 43200           # 12 h
 max_data_rq_size = 4294967296     # 4 GiB
 max_presign_rq_size = 102400      # 100 KiB

@@ -31,25 +31,15 @@ struct Args {
     #[arg(long)]
     domain: Option<String>,
 
+    #[arg(long)]
+    presign_api_key: Option<String>,
+
     #[arg(short, long)]
     config: Option<PathBuf>,
 
     #[arg(short, long, default_value = "false")]
     verbose: bool,
 }
-
-/*
-* TODOs
-[x] Request size limits
-[x] Timeout
-[x] Request-IDs
-[x] Cleanup service
-
-[x] Graceful shutdown
-[ ] Metrics
-[ ] Configurable limits
-*
-*/
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -96,10 +96,17 @@ pub async fn start(
                 .latency_unit(tower_http::LatencyUnit::Micros),
         );
 
+    let hmac_secret = if let Some(s) = config.presign_hmac_secret {
+        s.into_bytes()
+    } else {
+        /* generate random secret with 256 bit entropy */
+        (0..255).map(|_| rand::random()).collect()
+    };
+
     let auth = Arc::new(AuthState {
-        hmac_secret: (0..255).collect(),
+        hmac_secret,
         domain: config.domain,
-        api_key: "secret-api-key".to_string(),
+        api_key: config.presign_api_key,
     });
 
     let api_key_protected = Router::new()
