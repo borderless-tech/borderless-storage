@@ -63,7 +63,7 @@
               # The data directory and the port are fixed inside the container
               Env = [
                 "DATA_DIR=/data"
-                "IP_ADDR=127.0.0.1:8080"
+                "IP_ADDR=0.0.0.0:8080"
               ];
 
               # Entrypoint/Cmd: keep simple so env vars are easy to inject at runtime
