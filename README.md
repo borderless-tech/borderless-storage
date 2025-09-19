@@ -81,6 +81,31 @@ curl 127.0.0.1:3000/presign \
 curl "http://localhost:3000/files/01996168-e738-7552-9662-2041482b96c3?expires=1758277521&sig=QjRyPQUAQ9QwtKGiKg_4oUwK3QiuL3_X13UXiKs86W8=" -o My_Fancy_File.pdf
 ```
 
+### Chunked upload
+
+If you want to upload very large files, or upload from a very unstable connection (like a mobile device) you can use the chunked upload.
+This effectively allows you to upload your file piece by piece, while the server merges all chunks into a single file when you are done.
+
+This is done via the same upload endpoint, but using special request headers to indicate the upload type and chunk-index:
+
+``` shell
+curl -X POST "http://localhost:3000/upload/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
+    -H "X-Upload-Type: chunked" \ 
+    -H "X-Chunk-Index: 1" \ 
+    -H "X-Chunk-Total: 3" \ 
+    --data-binary @File-Chunk_1_3
+```
+
+After all chunks are uploaded, a last request advises the server to perform the merge:
+
+``` shell
+curl -X POST "http://localhost:3000/upload/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
+    -H "X-Upload-Type: chunked" \ 
+    -H "X-Chunk-Merge: true" \ 
+    -H "X-Chunk-Total: 3"
+```
+
+You can then download the file like normal.
 
 ## 🏗 Build & Deploy
 
@@ -105,7 +130,7 @@ sudo mkdir -p /var/lib/storage
 sudo chown "$USER" /var/lib/storage
 
 # 3) Run (choose one of the config methods)
-./target/release/nectarfs --ip-addr 0.0.0.0:8080 --data-dir /var/lib/storage --domain https://storage.example.com
+./target/release/borderless-storage --ip-addr 0.0.0.0:8080 --data-dir /var/lib/storage --domain https://storage.example.com
 ```
 
 ## ⚙️ Configuration
@@ -140,7 +165,7 @@ You can configure borderless-storage via **(1) config file**, **(2) CLI flags**,
 
 ```toml
 ip_addr = "0.0.0.0:8080"
-data_dir = "/var/lib/nectarfs"
+data_dir = "/var/lib/storage"
 domain = "https://storage.example.com"
 ttl_orphan_secs = 43200
 max_data_rq_size = 4294967296     # 4 GiB
@@ -153,7 +178,7 @@ rq_timeout_secs = 30
 ```
 borderless-storage \
   --ip-addr 0.0.0.0:8080 \
-  --data-dir /var/lib/nectarfs \
+  --data-dir /var/lib/storage \
   --domain https://storage.example.com \
   --verbose
 ```
@@ -168,7 +193,7 @@ borderless-storage --config ./config.toml
 
 ```
 export IP_ADDR=0.0.0.0:8080
-export DATA_DIR=/var/lib/nectarfs
+export DATA_DIR=/var/lib/storage
 export DOMAIN=https://storage.example.com
 # optional
 export TTL_ORPHAN_SECS=43200
