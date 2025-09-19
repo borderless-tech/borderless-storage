@@ -26,3 +26,4 @@ uuid = { version = "1.18.1", features = ["serde", "v4", "v7"] }
 
 [dev-dependencies]
 tempfile = "3.22.0"
+parking_lot = "0.12.4"
