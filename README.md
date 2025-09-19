@@ -21,7 +21,7 @@ persists data on the local filesystem, and includes an automatic janitor for cle
 
 ## 🚀 Quickstart
 
-You can use the `run.sh` to run the service locally in develop mode. See section building, deploying and configuration for more advanced options.
+You can use the `run.sh` to run the service locally in develop mode. See section [building](#manual-build), deploying and [configuration](#⚙️-configuration) for more advanced options.
 
 The actions are similar to s3, so before you can upload or download anything, you have to generate a presigned url via the `/presign` endpoint.
 Assuming you have your server locally available, it would look something like this:
@@ -161,49 +161,7 @@ You can configure borderless-storage via **(1) config file**, **(2) CLI flags**,
 
 > The server validates the data directory is writable by creating and removing a small probe file.
 
-### Example: `config.toml`
-
-```toml
-ip_addr = "0.0.0.0:8080"
-data_dir = "/var/lib/storage"
-domain = "https://storage.example.com"
-ttl_orphan_secs = 43200
-max_data_rq_size = 4294967296     # 4 GiB
-max_presign_rq_size = 102400      # 100 KiB
-rq_timeout_secs = 30
-```
-
-### CLI flags
-
-```
-borderless-storage \
-  --ip-addr 0.0.0.0:8080 \
-  --data-dir /var/lib/storage \
-  --domain https://storage.example.com \
-  --verbose
-```
-
-Or with config file:
-
-```
-borderless-storage --config ./config.toml
-```
-
-### Environment variables
-
-```
-export IP_ADDR=0.0.0.0:8080
-export DATA_DIR=/var/lib/storage
-export DOMAIN=https://storage.example.com
-# optional
-export TTL_ORPHAN_SECS=43200
-export MAX_DATA_RQ_SIZE=4294967296
-export MAX_PRESIGN_RQ_SIZE=102400
-export RQ_TIMEOUT_SECS=30
-borderless-storage
-```
-
----
+See [configuration examples](examples/configuration.md) for more information.
 
 ### Logging
 
