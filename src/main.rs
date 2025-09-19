@@ -42,7 +42,7 @@ struct Args {
 * TODOs
 [x] Request size limits
 [x] Timeout
-[ ] Request-IDs
+[x] Request-IDs
 [x] Cleanup service
 
 [x] Graceful shutdown
@@ -55,9 +55,13 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
-        .init();
+    let level = if args.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
+
+    tracing_subscriber::fmt().with_max_level(level).init();
 
     let config = Config::init(args)?;
     info!("📦 Data-Directory: {}", config.data_dir.display());

@@ -32,10 +32,6 @@ pub struct Config {
     /// (important to give out correct pre-signed urls)
     pub domain: String,
 
-    #[serde(default)]
-    /// Enable verbose logging
-    pub verbose: bool,
-
     /// Time-to-live (in seconds) for `.tmp` files and chunk-directories,
     /// before they are considered orphanaged.
     /// Defaults to `12 * 60 * 60` - which is 12 hours
@@ -63,7 +59,7 @@ impl Config {
         // 1. Try from config-file
         // 2. Try from arguments
         // 3. Try from environment
-        let mut config = if let Some(config_path) = args.config {
+        let config = if let Some(config_path) = args.config {
             info!("⚙ Parsing config from file: {}", config_path.display());
             let content = std::fs::read_to_string(&config_path).context(format!(
                 "failed to read config file at '{}'",
@@ -78,7 +74,6 @@ impl Config {
                 ip_addr: args.ip_addr.unwrap(),
                 data_dir: args.data_dir.unwrap(),
                 domain: args.domain.unwrap(),
-                verbose: args.verbose,
                 ttl_orphan_secs: DEFAULT_TTL_ORPHAN_SECS,
                 max_data_rq_size: DEFAULT_MAX_DATA_RQ_SIZE,
                 max_presign_rq_size: DEFAULT_MAX_PRESIGN_RQ_SIZE,
@@ -88,8 +83,6 @@ impl Config {
             info!("⚙ Parsing config from environment variables");
             Config::try_from_env()?
         };
-        // Override verbosity level
-        config.verbose = args.verbose;
 
         // --- Do some sanity checks and parsing
         check_directory_access(&config.data_dir)?;
@@ -120,7 +113,6 @@ impl Config {
             ip_addr,
             data_dir,
             domain,
-            verbose: false,
             ttl_orphan_secs,
             max_data_rq_size,
             max_presign_rq_size,

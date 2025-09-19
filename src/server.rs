@@ -3,7 +3,7 @@ use std::{
     io::{BufWriter, Write},
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use axum::{
@@ -11,7 +11,7 @@ use axum::{
     body::Body,
     extract::{Path, Request, State},
     http::{
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, StatusCode,
         header::{AUTHORIZATION, CONTENT_TYPE},
     },
     middleware::{self, Next},
@@ -25,10 +25,11 @@ use tokio::net::TcpListener;
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tower_http::{
     limit::RequestBodyLimitLayer,
-    request_id::{MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
-    timeout::RequestBodyTimeoutLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
+    timeout::{RequestBodyTimeoutLayer, TimeoutLayer},
+    trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
-use tracing::{debug, info, warn};
+use tracing::{Level, debug, info, warn};
 use uuid::Uuid;
 
 use self::error::Error;
@@ -67,6 +68,34 @@ pub async fn start(
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(config.ip_addr).await?;
 
+    // --- Initialize tracing layer
+    //
+    // NOTE: If we would use 'include_headers(true)' - then we need this layer aswell, to now show the bearer token in the log
+    // let exclude_headers = Arc::new([header::AUTHORIZATION, header::PROXY_AUTHORIZATION]);
+    // .layer(SetSensitiveHeadersLayer::from_shared(
+    //     exclude_headers.clone(),
+    // ))
+    let tracing_layer = TraceLayer::new_for_http()
+        // .make_span_with(DefaultMakeSpan::new().include_headers(true))
+        .make_span_with(|req: &axum::http::Request<_>| {
+            let rid = req
+                .extensions()
+                .get::<RequestId>()
+                .and_then(|id| id.header_value().to_str().ok())
+                .unwrap_or("-");
+            tracing::info_span!("request",
+                       request_id = %rid,
+                       method = %req.method(),
+                       uri = %req.uri()
+            )
+        })
+        .on_request(DefaultOnRequest::new().level(Level::DEBUG))
+        .on_response(
+            DefaultOnResponse::new()
+                .level(Level::INFO)
+                .latency_unit(tower_http::LatencyUnit::Micros),
+        );
+
     let auth = Arc::new(AuthState {
         hmac_secret: (0..255).collect(),
         domain: config.domain,
@@ -89,19 +118,36 @@ pub async fn start(
         .layer(RequestBodyLimitLayer::new(config.max_data_rq_size))
         .with_state(fs_controller);
 
+    // NOTE: Middleware is layered like an onion:
+    //
+    //         requests
+    //            |
+    //            v
+    // +----- layer_three -----+
+    // | +---- layer_two ----+ |
+    // | | +-- layer_one --+ | |
+    // | | |               | | |
+    // | | |    handler    | | |
+    // | | |               | | |
+    // | | +-- layer_one --+ | |
+    // | +---- layer_two ----+ |
+    // +----- layer_three -----+
+    //            |
+    //            v
+    //         responses
     let service = Router::new()
         .merge(api_key_protected)
         .merge(pre_sign_protected)
         .fallback(reject_404) // NOTE: Without the fallback, we would always hit the authorization layer
+        .layer(tracing_layer)
         .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::x_request_id(RqIdGenerator))
-        .layer(RequestBodyTimeoutLayer::new(Duration::from_secs(
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(TimeoutLayer::new(Duration::from_secs(
             config.rq_timeout_secs,
         )))
         .layer(RequestBodyTimeoutLayer::new(Duration::from_secs(
             config.rq_timeout_secs,
-        )))
-        .layer(middleware::from_fn(metrics));
+        )));
 
     info!("🚀 Launching webserver");
     axum::serve(listener, service)
@@ -110,15 +156,6 @@ pub async fn start(
         })
         .await?;
     Ok(())
-}
-
-#[derive(Clone)]
-struct RqIdGenerator;
-impl MakeRequestId for RqIdGenerator {
-    fn make_request_id<B>(&mut self, _req: &axum::http::Request<B>) -> Option<RequestId> {
-        let s = Uuid::now_v7().to_string();
-        HeaderValue::from_str(&s).ok().map(RequestId::new)
-    }
 }
 
 struct AuthState {
@@ -182,20 +219,6 @@ async fn require_presign_auth(
 
     Ok(next.run(req).await)
 }
-
-/// Metrics middleware
-async fn metrics(request: Request, next: Next) -> Response {
-    let now = Instant::now();
-    let method = request.method().clone();
-    let path = request.uri().path().to_string();
-    let response = next.run(request).await;
-    let elapsed = now.elapsed();
-    let status = response.status();
-    info!(%method, %path, %status, ?elapsed, "Served request");
-    response
-}
-
-// The basic idea is to have a crud interface for file blobs
 
 mod error {
     use super::Success;
@@ -543,7 +566,6 @@ async fn presign_url(
     Json(presign): Json<PresignRequest>,
 ) -> Result<Json<PresignResponse>> {
     let expires_in = presign.expires_in.unwrap_or(60 * 15); // 15 minutes default
-
     let (method, path, blob_id) = match presign.action {
         PresignAction::Upload => {
             let blob_id = presign.blob_id.unwrap_or_else(|| Uuid::now_v7());
@@ -557,6 +579,7 @@ async fn presign_url(
             ("GET", format!("/files/{blob_id}"), blob_id)
         }
     };
+    debug!(%expires_in, %method, %path, %blob_id, "presigning url");
 
     let signed_url =
         generate_presigned_url(method, &auth.domain, &path, &auth.hmac_secret, expires_in);
