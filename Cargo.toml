@@ -3,6 +3,7 @@ name = "borderless-storage"
 version = "0.1.0"
 edition = "2024"
 description = "A minimal S3-style object store with pre-signed URLs, chunked uploads, and a filesystem backend (based on Axum/Tokio)."
+authors = [ "Christian Hammermeister <c.hammermeister@borderless-technologies.com>" ]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["storage", "s3", "object-store", "axum", "tokio"]
