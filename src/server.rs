@@ -41,6 +41,8 @@ use crate::{
     },
 };
 
+// TODO: Cache-Control headers
+
 use super::Config;
 
 /// Http-header to specify the upload type
@@ -149,6 +151,16 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
         ])
         // Optional: cache preflight for a day
         .max_age(std::time::Duration::from_secs(24 * 60 * 60));
+
+    // TODO: Cache headers
+    // Ready-made header layers
+    // let no_store =
+    //     SetResponseHeaderLayer::overriding(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+
+    // let cache_immutable = SetResponseHeaderLayer::overriding(
+    //     CACHE_CONTROL,
+    //     HeaderValue::from_static("public, max-age=31536000, immutable"),
+    // );
 
     let hmac_secret = if let Some(s) = config.presign_hmac_secret {
         s.into_bytes()
@@ -619,6 +631,7 @@ async fn presign_url(
     State(auth): State<Arc<AuthState>>,
     Json(presign): Json<PresignRequest>,
 ) -> Result<Json<PresignResponse>> {
+    // TODO: maybe clamp to a maximum here
     let expires_in = presign.expires_in.unwrap_or(60 * 15); // 15 minutes default
     let (method, path, blob_id) = match presign.action {
         PresignAction::Upload => {

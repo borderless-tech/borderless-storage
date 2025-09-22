@@ -129,10 +129,11 @@ impl Config {
     }
 
     fn try_from_env() -> Result<Self> {
-        let ip_addr = get_from_env("IP_ADDR")?;
-        let data_dir = get_from_env("DATA_DIR")?;
-        let domain = get_from_env("DOMAIN")?;
-        let presign_api_key = get_from_env("PRESIGN_API_KEY")?;
+        let ip_addr = get_from_env("IP_ADDR").context("failed to parse IP_ADDR")?;
+        let data_dir = get_from_env("DATA_DIR").context("failed to parse DATA_DIR")?;
+        let domain = get_from_env("DOMAIN").context("failed to parse DOMAIN")?;
+        let presign_api_key =
+            get_from_env("PRESIGN_API_KEY").context("failed to parse PRESIGN_API_KEY")?;
         let presign_hmac_secret = get_from_env("PRESIGN_HMAC_SECRET").ok(); // default is 'None'
         let ttl_orphan_secs = get_from_env("TTL_ORPHAN_SECS").unwrap_or(DEFAULT_TTL_ORPHAN_SECS);
         let max_data_rq_size = get_from_env("MAX_DATA_RQ_SIZE").unwrap_or(DEFAULT_MAX_DATA_RQ_SIZE);
@@ -165,7 +166,9 @@ fn get_from_env<T: DeserializeOwned>(var: &'static str) -> Result<T> {
         Ok(value.try_into()?)
     } else {
         let quoted = format!("'{}'", value_string.trim());
-        let value: toml::Value = quoted.parse()?;
+        let value: toml::Value = quoted
+            .parse()
+            .context(format!("failed to parse value for '{var}'"))?;
         Ok(value.try_into()?)
     }
 }
