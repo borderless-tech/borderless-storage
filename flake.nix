@@ -33,7 +33,7 @@
             # Expose useful metadata
             meta = with lib; {
               description = "A minimal S3-style object store with pre-signed URLs and chunked uploads (Axum/Tokio).";
-              homepage = "https://github.com/borderless/borderless-storage";
+              homepage = "https://github.com/borderless-tech/borderless-storage";
               license = with licenses; [ mit asl20 ];
               maintainers = [ ];
               platforms = platforms.unix;
