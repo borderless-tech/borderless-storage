@@ -10,7 +10,6 @@ keywords = ["storage", "s3", "object-store", "axum", "tokio"]
 categories = ["filesystem", "asynchronous", "network-programming", "web-programming::http-server"]
 repository = "https://github.com/borderless-tech/borderless-storage"
 homepage = "https://github.com/borderless-tech/borderless-storage"
-documentation = "https://docs.rs/borderless-storage"
 
 # Keep the published crate tidy (omit CI files, .vscode, etc.)
 # If you intend to publish only the library helpers, you can also switch to `include = [...]`.
