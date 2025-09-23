@@ -187,18 +187,18 @@ You can configure borderless-storage via **(1) config file**, **(2) CLI flags**,
 
 ### Configuration keys & defaults
 
-| Key                   | Env var               | Default                | Notes                              |
-| --------------------- | --------------------- | ---------------------- | ---------------------------------- |
-| `ip_addr`             | `IP_ADDR`             | — (required)           | Must parse as socket address       |
-| `data_dir`            | `DATA_DIR`            | — (required)           | Directory must exist & be writable |
-| `domain`              | `DOMAIN`              | — (required)           | Parsed as `http::Uri`              |
-| `presign_api_key`     | `PRESIGN_API_KEY`     | — (required)           | Use a secure API-Key in production |
-| `presign_hmac_secret` | `PRESIGN_HMAC_SECRET` | generate random secret | Use a secure secret in production  |
-| `cors_origins`        | `CORS_ORIGINS`        | all origins ('\*')     | Comma separated list of origins    |
-| `ttl_orphan_secs`     | `TTL_ORPHAN_SECS`     | `43200` (12h)          | Orphan TTL for temp files/chunks   |
-| `max_data_rq_size`    | `MAX_DATA_RQ_SIZE`    | `4 * 1024^3` (4 GiB)   | Hard cap for data API requests     |
-| `max_presign_rq_size` | `MAX_PRESIGN_RQ_SIZE` | `100 * 1024` (100 KiB) | Hard cap for pre‑sign endpoints    |
-| `rq_timeout_secs`     | `RQ_TIMEOUT_SECS`     | `30` seconds           | Per‑request timeout                |
+| Key                   | Env var               | Default                  | Notes                              |
+| --------------------- | --------------------- | ------------------------ | ---------------------------------- |
+| `ip_addr`             | `IP_ADDR`             | — (required)             | Must parse as socket address       |
+| `data_dir`            | `DATA_DIR`            | — (required)             | Directory must exist & be writable |
+| `domain`              | `DOMAIN`              | — (required)             | Parsed as `http::Uri`              |
+| `presign_api_key`     | `PRESIGN_API_KEY`     | — (required)             | Use a secure API-Key in production |
+| `presign_hmac_secret` | `PRESIGN_HMAC_SECRET` | generate random secret   | Use a secure secret in production  |
+| `cors_origins`        | `CORS_ORIGINS`        | all origins ('\*')       | Comma separated list of origins    |
+| `ttl_orphan_secs`     | `TTL_ORPHAN_SECS`     | `43200` (12h)            | Orphan TTL for temp files/chunks   |
+| `max_data_rq_size`    | `MAX_DATA_RQ_SIZE`    | `256 * 1024^2` (256 MiB) | Hard cap for data API requests     |
+| `max_presign_rq_size` | `MAX_PRESIGN_RQ_SIZE` | `10 * 1024` (10 KiB)     | Hard cap for pre‑sign endpoints    |
+| `rq_timeout_secs`     | `RQ_TIMEOUT_SECS`     | `30` seconds             | Per‑request timeout                |
 
 > The server validates the data directory is writable by creating and removing a small probe file.
 

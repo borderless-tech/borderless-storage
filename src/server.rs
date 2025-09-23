@@ -7,12 +7,12 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Body,
     extract::{Path, Request, State},
     http::{
-        HeaderMap, HeaderName, Method, StatusCode,
-        header::{AUTHORIZATION, CONTENT_TYPE},
+        HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -27,6 +27,7 @@ use tower_http::{
     cors::CorsLayer,
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
+    set_header::SetResponseHeaderLayer,
     timeout::{RequestBodyTimeoutLayer, TimeoutLayer},
     trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
@@ -40,8 +41,6 @@ use crate::{
         byte_size_str, extract_sig_from_query, generate_presigned_url, verify_presigned_signature,
     },
 };
-
-// TODO: Cache-Control headers
 
 use super::Config;
 
@@ -62,6 +61,9 @@ const CHUNK_TOTAL: &str = "x-chunk-total";
 
 /// Http-header that is used in the last request of a chunk upload to advice the server to merge the chunks
 const CHUNK_MERGE: &str = "x-chunk-merge";
+
+/// Maximum (and default) expiry time for signatures
+const MAX_EXPIRY_SECS: u64 = 15 * 60; // 15 Minutes
 
 /// Entrypoint to start the webserver
 ///
@@ -110,7 +112,7 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
         .on_response(
             DefaultOnResponse::new()
                 .level(Level::INFO)
-                .latency_unit(tower_http::LatencyUnit::Micros),
+                .latency_unit(tower_http::LatencyUnit::Millis),
         );
 
     // In debug mode, always allow all cors headers
@@ -152,15 +154,9 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
         // Optional: cache preflight for a day
         .max_age(std::time::Duration::from_secs(24 * 60 * 60));
 
-    // TODO: Cache headers
-    // Ready-made header layers
-    // let no_store =
-    //     SetResponseHeaderLayer::overriding(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-
-    // let cache_immutable = SetResponseHeaderLayer::overriding(
-    //     CACHE_CONTROL,
-    //     HeaderValue::from_static("public, max-age=31536000, immutable"),
-    // );
+    // Add no-store header for upload and presign route
+    let no_store =
+        SetResponseHeaderLayer::overriding(CACHE_CONTROL, HeaderValue::from_static("no-store"));
 
     let hmac_secret = if let Some(s) = config.presign_hmac_secret {
         s.into_bytes()
@@ -182,10 +178,21 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
             require_api_key_auth,
         ))
         .layer(RequestBodyLimitLayer::new(config.max_presign_rq_size))
+        .layer(no_store.clone()) // Never cache presign responses
         .with_state(auth.clone());
 
-    let pre_sign_protected = Router::new()
+    let pre_sign_upload = Router::new()
         .route("/upload/{blob_id}", post(upload_data))
+        .layer(middleware::from_fn_with_state(
+            auth.clone(),
+            require_presign_auth,
+        ))
+        .layer(RequestBodyLimitLayer::new(config.max_data_rq_size))
+        .layer(no_store.clone()) // Never cache responses with presigned-urls
+        .with_state(fs_controller.clone());
+
+    // NOTE: The download route sets the cache header directly in the response
+    let pre_sign_download = Router::new()
         .route("/files/{blob_id}", get(read_blob))
         .layer(middleware::from_fn_with_state(auth, require_presign_auth))
         .layer(RequestBodyLimitLayer::new(config.max_data_rq_size))
@@ -210,7 +217,8 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
     //         responses
     Router::new()
         .merge(api_key_protected)
-        .merge(pre_sign_protected)
+        .merge(pre_sign_upload)
+        .merge(pre_sign_download)
         .fallback(reject_404) // NOTE: Without the fallback, we would always hit the authorization layer
         .layer(cors)
         .layer(tracing_layer)
@@ -268,10 +276,14 @@ async fn require_api_key_auth(
     Ok(next.run(req).await)
 }
 
+/// Presign TTL to set cache header to the correct time
+#[derive(Clone, Copy)]
+struct PresignTtl(u64);
+
 /// Middleware that checks if the request uses a pre-signed-url
 async fn require_presign_auth(
     State(auth): State<Arc<AuthState>>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Result<impl IntoResponse> {
     let method = req.method().as_str();
@@ -280,8 +292,11 @@ async fn require_presign_auth(
 
     // Extract signature and verify it
     let (expires, sig) = extract_sig_from_query(query).map_err(Error::Unauthorized)?;
-    verify_presigned_signature(method, path, &sig, expires, &auth.hmac_secret)
+    let ttl = verify_presigned_signature(method, path, &sig, expires, &auth.hmac_secret)
         .map_err(Error::Unauthorized)?; // NOTE: The "?" is important here !
+
+    // Insert ttl into extension
+    req.extensions_mut().insert(PresignTtl(ttl));
 
     Ok(next.run(req).await)
 }
@@ -368,6 +383,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 async fn read_blob(
     State(storage): State<FsController>,
+    Extension(PresignTtl(rem_ttl)): Extension<PresignTtl>,
     Path(blob_id): Path<Uuid>,
 ) -> Result<Response> {
     let (blob_path, _) = storage.blob_path(&blob_id);
@@ -380,8 +396,17 @@ async fn read_blob(
     let stream = ReaderStream::new(f);
     let body = Body::from_stream(stream);
 
+    // Set cache-control header to remainaing ttl (and clamp at MAX_)
+    let max_age = rem_ttl.min(MAX_EXPIRY_SECS);
+    let cache_hdr = if max_age > 0 {
+        format!("private, max-age={max_age}, immutable")
+    } else {
+        "no-store".to_string()
+    };
+
     let response = Response::builder()
         .header(CONTENT_TYPE, "application/octet-stream")
+        .header(CACHE_CONTROL, cache_hdr)
         .body(body)?;
 
     Ok(response)
@@ -631,8 +656,13 @@ async fn presign_url(
     State(auth): State<Arc<AuthState>>,
     Json(presign): Json<PresignRequest>,
 ) -> Result<Json<PresignResponse>> {
-    // TODO: maybe clamp to a maximum here
-    let expires_in = presign.expires_in.unwrap_or(60 * 15); // 15 minutes default
+    // Use max as default and clamp to maximum
+    let expires_in = presign
+        .expires_in
+        .unwrap_or(MAX_EXPIRY_SECS)
+        .min(MAX_EXPIRY_SECS);
+
+    // Check upload action
     let (method, path, blob_id) = match presign.action {
         PresignAction::Upload => {
             let blob_id = presign.blob_id.unwrap_or_else(Uuid::now_v7);

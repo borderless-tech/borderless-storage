@@ -116,7 +116,7 @@ pub fn verify_presigned_signature(
     sig: &str,
     expires: u64,
     secret: &[u8],
-) -> Result<(), String> {
+) -> Result<u64, String> {
     debug_assert!(path.starts_with('/'), "paths must start with a '/'");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -131,7 +131,9 @@ pub fn verify_presigned_signature(
 
     // Constant-time compare
     if subtle::ConstantTimeEq::ct_eq(sig_expected.as_bytes(), sig.as_bytes()).into() {
-        Ok(())
+        // compute remaining ttl (saturate at 0)
+        let remaining = expires.saturating_sub(now);
+        Ok(remaining)
     } else {
         Err("invalid signature".to_string())
     }

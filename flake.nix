@@ -18,7 +18,7 @@
 
         # Package metadata
         pname = "borderless-storage";
-        version = "0.1.1";
+        version = "0.1.2";
 
         # If you don't want to commit Cargo.lock, replace cargoLock with cargoHash = lib.fakeHash;
         # and run `nix build` once to get the real hash to paste back.

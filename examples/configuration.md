@@ -14,8 +14,8 @@ presign_api_key = "I5642qehwRMNDIBEtthjbzWN4uFDdzf6"
 presign_hmac_secret = "9RKNSeGVA9F2agDgEkOqzra3EUs320trMkTRMx1AdJ4BE7AoTpzpkPNE0FU9D2yN"
 cors_origins = "https://www.example.com,https://api.example.com"
 ttl_orphan_secs = 43200
-max_data_rq_size = 4294967296     # 4 GiB
-max_presign_rq_size = 102400      # 100 KiB
+max_data_rq_size = 268435456     # 256 MiB
+max_presign_rq_size = 10240      # 10 KiB
 rq_timeout_secs = 30
 ```
 
@@ -55,8 +55,8 @@ export PRESIGN_API_KEY="I5642qehwRMNDIBEtthjbzWN4uFDdzf6"
 export PRESIGN_HMAC_SECRET="9RKNSeGVA9F2agDgEkOqzra3EUs320trMkTRMx1AdJ4BE7AoTpzpkPNE0FU9D2yN"
 export CORS_ORIGINS="https://www.example.com,https://api.example.com"
 export TTL_ORPHAN_SECS=43200
-export MAX_DATA_RQ_SIZE=4294967296
-export MAX_PRESIGN_RQ_SIZE=102400
+export MAX_DATA_RQ_SIZE=268435456
+export MAX_PRESIGN_RQ_SIZE=10240
 export RQ_TIMEOUT_SECS=30
 borderless-storage
 ```

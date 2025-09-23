@@ -10,11 +10,11 @@ use crate::{Args, utils::check_directory_access};
 /// Default config value for ttl-orphan-secs
 const DEFAULT_TTL_ORPHAN_SECS: u64 = 12 * 60 * 60;
 
-/// Maximum size (in bytes) for data-requests (4GB)
-const DEFAULT_MAX_DATA_RQ_SIZE: usize = 4 * 1024 * 1024 * 1024;
+/// Maximum size (in bytes) for data-requests (256 MB)
+const DEFAULT_MAX_DATA_RQ_SIZE: usize = 256 * 1024 * 1024;
 
-/// Maximum size (in bytes) for presign-requests (100kB)
-const DEFAULT_MAX_PRESIGN_RQ_SIZE: usize = 100 * 1024;
+/// Maximum size (in bytes) for presign-requests (10 kB)
+const DEFAULT_MAX_PRESIGN_RQ_SIZE: usize = 10 * 1024;
 
 /// Default timeout for incoming http-requests
 const DEFAULT_RQ_TIMEOUT_SECS: u64 = 30;

@@ -11,7 +11,7 @@ cors_origins = "https://www.example.com, https://api.example.com"
 presign_hmac_secret = "DFiqt36ecTMw3TxGYrlYvkD2kXE6mQvf"
 
 # - Service Fine-tuning (you can leave the defaults here in most cases)
-ttl_orphan_secs = 43200           # 12 h
-max_data_rq_size = 4294967296     # 4 GiB
-max_presign_rq_size = 102400      # 100 KiB
+ttl_orphan_secs = 43200          # 12 h
+max_data_rq_size = 268435456     # 256 MiB
+max_presign_rq_size = 10240      # 10 KiB
 rq_timeout_secs = 30

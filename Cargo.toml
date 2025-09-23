@@ -1,6 +1,6 @@
 [package]
 name = "borderless-storage"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A minimal S3-style object store with pre-signed URLs, chunked uploads, and a filesystem backend (based on Axum/Tokio)."
 authors = [ "Christian Hammermeister <c.hammermeister@borderless-technologies.com>" ]
@@ -38,7 +38,7 @@ thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["full"] }
 tokio-util = { version = "0.7.16", features = ["io"] }
 toml = "0.9.6"
-tower-http = { version = "0.6.6", features = ["limit", "request-id", "timeout", "trace", "cors"] }
+tower-http = { version = "0.6.6", features = ["limit", "request-id", "timeout", "trace", "cors", "set-header"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 uuid = { version = "1.18.1", features = ["serde", "v4", "v7"] }
