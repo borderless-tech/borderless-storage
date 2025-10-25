@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::Context;
+use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
@@ -120,10 +121,13 @@ impl FsController {
         let f = File::create(&final_tmp)?;
         let mut writer = BufWriter::new(f);
         let mut bytes_written = 0;
+        let mut hash = Sha256::new();
         for chunk_idx in 1..=chunk_total {
             let chunk = chunk_sub_dir.join(format!("chunk_{chunk_idx}_{chunk_total}"));
             let part_file = File::open(&chunk)?;
             let mut reader = BufReader::new(part_file);
+
+            // TODO: We need to update the hasher here - is this possible ??
 
             // Copy the content of the part file into the writer
             bytes_written += io::copy(&mut reader, &mut writer)?;

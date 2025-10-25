@@ -20,6 +20,7 @@ use axum::{
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
@@ -595,7 +596,7 @@ async fn upload_chunk(
     if blob_path.exists() {
         return Err(Error::Duplicate);
     }
-    let bytes_written = stream_body_to_file(body, chunk_path, chunk_tmp).await?;
+    let (bytes_written, _sha256) = stream_body_to_file(body, chunk_path, chunk_tmp).await?;
     let bytes = byte_size_str(bytes_written);
     debug!(%blob_id, %bytes, "uploaded chunk {chunk_idx}/{chunk_total}");
 
@@ -658,7 +659,7 @@ async fn upload_full(
     if blob_path.exists() {
         return Err(Error::Duplicate);
     }
-    let bytes_written = stream_body_to_file(body, blob_path, blob_tmp).await?;
+    let (bytes_written, sha256) = stream_body_to_file(body, blob_path, blob_tmp).await?;
 
     // Update metadata with file size and store it
     metadata = metadata.with_file_size(Some(bytes_written as i64));
@@ -685,14 +686,20 @@ async fn upload_full(
 ///
 /// This way we will not end up with broken files due to interrupted connections.
 /// All files with the `.tmp` suffix can later be spotted and removed.
-async fn stream_body_to_file(body: Body, target_path: PathBuf, tmp_path: PathBuf) -> Result<usize> {
+async fn stream_body_to_file(
+    body: Body,
+    target_path: PathBuf,
+    tmp_path: PathBuf,
+) -> Result<(usize, [u8; 32])> {
     let f = File::create(&tmp_path)?;
     let mut writer = BufWriter::new(f);
     let mut bytes_written = 0;
     let mut stream = body.into_data_stream();
+    let mut hash = Sha256::new();
     while let Some(result) = stream.next().await {
         match result {
             Ok(b) => {
+                hash.update(&b);
                 writer.write_all(&b)?;
                 bytes_written += b.len();
             }
@@ -703,7 +710,8 @@ async fn stream_body_to_file(body: Body, target_path: PathBuf, tmp_path: PathBuf
     }
     writer.flush()?;
     std::fs::rename(&tmp_path, &target_path)?;
-    Ok(bytes_written)
+    let sha256 = hash.finalize();
+    Ok((bytes_written, sha256.into()))
 }
 
 #[derive(Serialize, Deserialize)]
