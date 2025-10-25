@@ -1,6 +1,6 @@
 [package]
 name = "borderless-storage"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A minimal S3-style object store with pre-signed URLs, chunked uploads, and a filesystem backend (based on Axum/Tokio)."
 authors = [ "Christian Hammermeister <c.hammermeister@borderless-technologies.com>" ]

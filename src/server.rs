@@ -149,6 +149,7 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
         .allow_headers([
             AUTHORIZATION,
             CONTENT_TYPE,
+            CONTENT_DISPOSITION,
             HeaderName::from_static(UPLOAD_TYPE),
             HeaderName::from_static(CHUNK_IDX),
             HeaderName::from_static(CHUNK_TOTAL),
