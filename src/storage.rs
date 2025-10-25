@@ -9,6 +9,8 @@ use std::{
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
+use crate::metadata::{MetadataStore, BlobMetadata};
+
 /// Sub-Directory, where all data is stored to
 const FS_DATA_DIR: &str = "full";
 
@@ -24,15 +26,21 @@ const FS_CHUNK_DIR: &str = "chunks";
 #[derive(Debug, Clone)]
 pub struct FsController {
     base_path: Arc<PathBuf>,
+    metadata_store: Arc<MetadataStore>,
 }
 
 impl FsController {
-    pub fn init(base_path: &Path) -> Result<Self, io::Error> {
+    pub fn init(base_path: &Path, metadata_db_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Create base directories
         create_dir_all(base_path.join(FS_DATA_DIR))?;
         create_dir_all(base_path.join(FS_CHUNK_DIR))?;
+        
+        // Initialize metadata store
+        let metadata_store = MetadataStore::init(metadata_db_path)?;
+        
         Ok(FsController {
             base_path: Arc::new(base_path.to_path_buf()),
+            metadata_store: Arc::new(metadata_store),
         })
     }
 
@@ -195,6 +203,51 @@ impl FsController {
         }
         Ok(out)
     }
+
+    /// Store metadata for a blob
+    pub fn store_metadata(&self, metadata: &BlobMetadata) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.metadata_store.store_metadata(metadata)?;
+        Ok(())
+    }
+
+    /// Retrieve metadata for a blob
+    pub fn get_metadata(&self, blob_id: &Uuid) -> Result<Option<BlobMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.metadata_store.get_metadata(blob_id)?)
+    }
+
+    /// Delete metadata for a blob
+    pub fn delete_metadata(&self, blob_id: &Uuid) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.metadata_store.delete_metadata(blob_id)?)
+    }
+
+    /// Cleanup orphaned metadata entries
+    pub fn cleanup_orphaned_metadata(&self, ttl_orphan_secs: u64) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let cutoff_timestamp = now.saturating_sub(ttl_orphan_secs) as i64;
+        
+        // Get all blob IDs with metadata
+        let blob_ids = self.metadata_store.get_all_blob_ids()?;
+        let mut deleted_count = 0;
+        
+        // Check if the blob files still exist
+        for blob_id in blob_ids {
+            let (blob_path, _) = self.blob_path(&blob_id);
+            if !blob_path.exists() {
+                // Blob file doesn't exist, remove its metadata
+                if self.metadata_store.delete_metadata(&blob_id)? {
+                    deleted_count += 1;
+                }
+            }
+        }
+        
+        // Also clean up old metadata entries based on timestamp
+        let timestamp_deleted = self.metadata_store.cleanup_metadata_before(cutoff_timestamp)?;
+        
+        Ok(deleted_count + timestamp_deleted)
+    }
 }
 
 /// Helper function for the cleanup routine.
@@ -214,10 +267,16 @@ pub async fn cleanup_routine(fs_controller: FsController, ttl_orphan_secs: u64) 
             debug!("🧹 Removing {}", dir.display());
             remove_dir_all(dir)?;
         }
+
+        // Clean up orphaned metadata entries
+        let orphaned_metadata = fs_controller.cleanup_orphaned_metadata(ttl_orphan_secs)
+            .map_err(|e| anyhow::anyhow!("Failed to cleanup orphaned metadata: {}", e))?;
+
         info!(
-            "🧹 Removed {} orphaned files and {} orphaned chunk directories",
+            "🧹 Removed {} orphaned files, {} orphaned chunk directories, and {} orphaned metadata entries",
             orphaned_files.len(),
-            orphaned_dirs.len()
+            orphaned_dirs.len(),
+            orphaned_metadata
         );
         Ok(())
     });
@@ -248,7 +307,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let base = dir.path();
 
-        let fs = FsController::init(base).expect("init fs");
+        let metadata_db = base.join("metadata.db");
+        let fs = FsController::init(base, &metadata_db).expect("init fs");
         let full = base.join("full");
         let chunks = base.join("chunks");
 
@@ -276,7 +336,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let base = dir.path();
 
-        let fs = FsController::init(base).expect("init fs");
+        let metadata_db = base.join("metadata.db");
+        let fs = FsController::init(base, &metadata_db).expect("init fs");
         let id = Uuid::new_v4();
 
         // Call chunk_path for the first time; it should create chunks/<uuid> dir
@@ -303,7 +364,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let base = dir.path();
 
-        let fs = FsController::init(base).expect("init fs");
+        let metadata_db = base.join("metadata.db");
+        let fs = FsController::init(base, &metadata_db).expect("init fs");
         let id = Uuid::new_v4();
         let total = 4;
 
@@ -332,7 +394,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let base = dir.path();
 
-        let fs = FsController::init(base).expect("init fs");
+        let metadata_db = base.join("metadata.db");
+        let fs = FsController::init(base, &metadata_db).expect("init fs");
         let id = Uuid::new_v4();
         let total = 3;
 
@@ -370,7 +433,8 @@ mod tests {
     fn find_orphaned_tmp_files_filters_by_extension_and_ttl() {
         let dir = tempdir().unwrap();
         let base = dir.path();
-        let fs = FsController::init(base).expect("init fs");
+        let metadata_db = base.join("metadata.db");
+        let fs = FsController::init(base, &metadata_db).expect("init fs");
 
         // Create one tmp file and one regular file in full/
         let (final_path, tmp_path) = fs.blob_path(&Uuid::new_v4());
@@ -398,7 +462,8 @@ mod tests {
     fn find_orphaned_chunks_behaves_with_ttl() {
         let dir = tempdir().unwrap();
         let base = dir.path();
-        let fs = FsController::init(base).expect("init fs");
+        let metadata_db = base.join("metadata.db");
+        let fs = FsController::init(base, &metadata_db).expect("init fs");
 
         // Create two different chunk directories with a file inside each
         let id1 = Uuid::new_v4();
@@ -429,8 +494,9 @@ mod tests {
     // Build a minimal FsController on a temp dir
     fn make_fs() -> (FsController, TempDir) {
         let dir = tempdir().expect("tempdir");
+        let metadata_db = dir.path().join("metadata.db");
         // Create the base structure via FsController::init
-        (FsController::init(dir.path()).expect("init fs"), dir)
+        (FsController::init(dir.path(), &metadata_db).expect("init fs"), dir)
     }
 
     /// Create a normal (non-tmp) blob and a tmp blob in `full/`, plus a chunk dir

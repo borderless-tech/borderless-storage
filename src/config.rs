@@ -60,6 +60,10 @@ pub struct Config {
 
     /// Request Timeout in seconds
     pub rq_timeout_secs: u64,
+
+    /// Path to the metadata database
+    /// Defaults to `<DATA_DIR>/metadata.db`
+    pub metadata_db_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -100,6 +104,7 @@ impl Config {
                 max_data_rq_size: DEFAULT_MAX_DATA_RQ_SIZE,
                 max_presign_rq_size: DEFAULT_MAX_PRESIGN_RQ_SIZE,
                 rq_timeout_secs: DEFAULT_RQ_TIMEOUT_SECS,
+                metadata_db_path: None,
             }
         } else {
             info!("⚙ Parsing config from environment variables");
@@ -128,6 +133,15 @@ impl Config {
         Ok(config)
     }
 
+    /// Get the resolved metadata database path
+    /// Defaults to `<data_dir>/metadata.db` if not specified
+    pub fn get_metadata_db_path(&self) -> PathBuf {
+        match &self.metadata_db_path {
+            Some(path) => path.clone(),
+            None => self.data_dir.join("metadata.db"),
+        }
+    }
+
     fn try_from_env() -> Result<Self> {
         let ip_addr = get_from_env("IP_ADDR").context("failed to parse IP_ADDR")?;
         let data_dir = get_from_env("DATA_DIR").context("failed to parse DATA_DIR")?;
@@ -141,6 +155,7 @@ impl Config {
             get_from_env("MAX_PRESIGN_RQ_SIZE").unwrap_or(DEFAULT_MAX_PRESIGN_RQ_SIZE);
         let rq_timeout_secs = get_from_env("RQ_TIMEOUT_SECS").unwrap_or(DEFAULT_RQ_TIMEOUT_SECS);
         let cors_origins = get_from_env("CORS_ORIGINS").ok(); // default is 'None'
+        let metadata_db_path = get_from_env("METADATA_DB_PATH").ok(); // default is 'None'
         Ok(Config {
             ip_addr,
             data_dir,
@@ -152,6 +167,7 @@ impl Config {
             max_data_rq_size,
             max_presign_rq_size,
             rq_timeout_secs,
+            metadata_db_path,
         })
     }
 }

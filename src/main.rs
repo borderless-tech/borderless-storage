@@ -118,6 +118,7 @@ use tracing::{Level, info};
 use utils::{byte_size_str, large_secs_str};
 
 mod config;
+mod metadata;
 mod server;
 mod storage;
 mod utils;
@@ -171,7 +172,9 @@ async fn main() -> Result<()> {
     );
     info!("🌐 Request-Timeout: {}s", config.rq_timeout_secs);
 
-    let fs_controller = FsController::init(&config.data_dir)?;
+    let metadata_db_path = config.get_metadata_db_path();
+    let fs_controller = FsController::init(&config.data_dir, &metadata_db_path)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize storage controller: {}", e))?;
 
     // --- Create shutdown token
     let shutdown_token = CancellationToken::new();

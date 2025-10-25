@@ -15,3 +15,6 @@ ttl_orphan_secs = 43200          # 12 h
 max_data_rq_size = 268435456     # 256 MiB
 max_presign_rq_size = 10240      # 10 KiB
 rq_timeout_secs = 30
+
+# - Metadata Database (optional - defaults to <data_dir>/metadata.db)
+# metadata_db_path = "/var/lib/storage/blob_metadata.db"

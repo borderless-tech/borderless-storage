@@ -51,6 +51,8 @@ You can now use the pre-signed url to upload your data (which will be stored und
 
 ```bash
 curl -X POST "http://localhost:3000/upload/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
+    -H "Content-Type: application/pdf" \
+    -H "Content-Disposition: attachment; filename=\"My_Fancy_File.pdf\"" \
     --data-binary @My_Fancy_File.pdf
 ```
 
@@ -106,6 +108,30 @@ curl -X POST "http://localhost:3000/upload/01996168-e738-7552-9662-2041482b96c3?
 ```
 
 You can then download the file like normal.
+
+### 📄 Metadata Support
+
+The storage server now supports proper browser downloads by preserving file metadata:
+
+- **Content-Type**: Set the `Content-Type` header during upload to ensure proper MIME type handling
+- **Content-Disposition**: Set the `Content-Disposition` header to control filename and download behavior
+- **Automatic Storage**: Metadata is automatically stored in an SQLite database alongside your files
+- **Backward Compatibility**: Files uploaded without metadata headers use sensible defaults
+
+Example with metadata:
+```bash
+# Upload with proper metadata
+curl -X POST "<presigned-upload-url>" \
+    -H "Content-Type: image/png" \
+    -H "Content-Disposition: attachment; filename=\"screenshot.png\"" \
+    --data-binary @screenshot.png
+
+# When downloaded, browsers will:
+# 1. Recognize this as a PNG image (Content-Type)
+# 2. Suggest "screenshot.png" as the filename (Content-Disposition)
+```
+
+For chunked uploads, metadata headers should be included in the final merge request.
 
 ## 🏗 Build & Deploy
 
@@ -199,6 +225,7 @@ You can configure borderless-storage via **(1) config file**, **(2) CLI flags**,
 | `max_data_rq_size`    | `MAX_DATA_RQ_SIZE`    | `256 * 1024^2` (256 MiB) | Hard cap for data API requests     |
 | `max_presign_rq_size` | `MAX_PRESIGN_RQ_SIZE` | `10 * 1024` (10 KiB)     | Hard cap for pre‑sign endpoints    |
 | `rq_timeout_secs`     | `RQ_TIMEOUT_SECS`     | `30` seconds             | Per‑request timeout                |
+| `metadata_db_path`    | `METADATA_DB_PATH`    | `<data_dir>/metadata.db` | SQLite database for blob metadata  |
 
 > The server validates the data directory is writable by creating and removing a small probe file.
 

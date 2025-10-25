@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 use self::error::Error;
 use crate::{
+    metadata::BlobMetadata,
     storage::FsController,
     utils::{
         byte_size_str, extract_sig_from_query, generate_presigned_url, verify_presigned_signature,
@@ -396,7 +397,7 @@ async fn read_blob(
     let stream = ReaderStream::new(f);
     let body = Body::from_stream(stream);
 
-    // Set cache-control header to remainaing ttl (and clamp at MAX_)
+    // Set cache-control header to remaining ttl (and clamp at MAX_)
     let max_age = rem_ttl.min(MAX_EXPIRY_SECS);
     let cache_hdr = if max_age > 0 {
         format!("private, max-age={max_age}, immutable")
@@ -404,11 +405,45 @@ async fn read_blob(
         "no-store".to_string()
     };
 
-    let response = Response::builder()
-        .header(CONTENT_TYPE, "application/octet-stream")
-        .header(CACHE_CONTROL, cache_hdr)
-        .body(body)?;
+    // Retrieve metadata and apply to response headers
+    let mut response_builder = Response::builder()
+        .header(CACHE_CONTROL, cache_hdr);
 
+    // Try to get metadata and apply Content-Type and Content-Disposition
+    match storage.get_metadata(&blob_id) {
+        Ok(Some(metadata)) => {
+            // Apply Content-Type if available, otherwise use default
+            if let Some(content_type) = &metadata.content_type {
+                response_builder = response_builder.header(CONTENT_TYPE, content_type);
+            } else {
+                response_builder = response_builder.header(CONTENT_TYPE, "application/octet-stream");
+            }
+
+            // Apply Content-Disposition if available
+            if let Some(content_disposition) = &metadata.content_disposition {
+                response_builder = response_builder.header(axum::http::header::CONTENT_DISPOSITION, content_disposition);
+            }
+
+            debug!(
+                blob_id = %blob_id,
+                content_type = metadata.content_type.as_deref().unwrap_or("none"),
+                content_disposition = metadata.content_disposition.as_deref().unwrap_or("none"),
+                "applied blob metadata to response"
+            );
+        }
+        Ok(None) => {
+            // No metadata found, use default Content-Type
+            response_builder = response_builder.header(CONTENT_TYPE, "application/octet-stream");
+            debug!(blob_id = %blob_id, "no metadata found, using default headers");
+        }
+        Err(e) => {
+            // Error retrieving metadata, use default and log warning
+            warn!(blob_id = %blob_id, "failed to retrieve metadata: {}", e);
+            response_builder = response_builder.header(CONTENT_TYPE, "application/octet-stream");
+        }
+    }
+
+    let response = response_builder.body(body)?;
     Ok(response)
 }
 
@@ -480,6 +515,23 @@ impl UploadType {
     }
 }
 
+/// Extract metadata from request headers
+fn extract_metadata_from_headers(headers: &HeaderMap, blob_id: Uuid) -> BlobMetadata {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+
+    let content_disposition = headers
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+
+    BlobMetadata::new(blob_id)
+        .with_content_type(content_type)
+        .with_content_disposition(content_disposition)
+}
+
 /// General entrypoint for the upload logic
 async fn upload_data(
     State(storage): State<FsController>,
@@ -487,12 +539,15 @@ async fn upload_data(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<Success>> {
-    // 1. Determine file upload type from headers
+    // 1. Extract metadata from headers
+    let metadata = extract_metadata_from_headers(&headers, blob_id);
+    
+    // 2. Determine file upload type from headers
     let upload_type = UploadType::from_headers(&headers)?;
 
     match upload_type {
         UploadType::Full => {
-            let r = upload_full(storage, blob_id, body).await;
+            let r = upload_full(storage, blob_id, metadata, body).await;
             if let Err(e) = &r {
                 warn!(%blob_id, "{e}");
             }
@@ -502,6 +557,7 @@ async fn upload_data(
             chunk_idx,
             chunk_total,
         } => {
+            // For chunked uploads, we'll store metadata when all chunks are merged
             let r = upload_chunk(storage, blob_id, chunk_idx, chunk_total, body).await;
             if let Err(e) = &r {
                 warn!(%blob_id, chunk_idx, chunk_total, "{e}");
@@ -509,7 +565,7 @@ async fn upload_data(
             r
         }
         UploadType::Merge { chunk_total } => {
-            let r = merge_chunks(storage, blob_id, chunk_total).await;
+            let r = merge_chunks(storage, blob_id, chunk_total, metadata).await;
             if let Err(e) = &r {
                 warn!(%blob_id, chunk_total, "{e}");
             }
@@ -550,6 +606,7 @@ async fn merge_chunks(
     storage: FsController,
     blob_id: Uuid,
     chunk_total: usize,
+    mut metadata: BlobMetadata,
 ) -> Result<Json<Success>> {
     // 1. Check that all chunks are present
     if let Err(missing_chunks) = storage.check_chunks(&blob_id, chunk_total) {
@@ -563,6 +620,13 @@ async fn merge_chunks(
     }
 
     let bytes_written = storage.merge_chunks(&blob_id, chunk_total)?;
+    
+    // Update metadata with file size and store it
+    metadata = metadata.with_file_size(Some(bytes_written as i64));
+    if let Err(e) = storage.store_metadata(&metadata) {
+        warn!(%blob_id, "Failed to store metadata: {}", e);
+    }
+    
     let bytes = byte_size_str(bytes_written);
     debug!(%blob_id, %bytes, "merged chunks");
     let success = Success {
@@ -576,12 +640,19 @@ async fn merge_chunks(
 }
 
 /// Helper function to perform the oneshot (full) upload
-async fn upload_full(storage: FsController, blob_id: Uuid, body: Body) -> Result<Json<Success>> {
+async fn upload_full(storage: FsController, blob_id: Uuid, mut metadata: BlobMetadata, body: Body) -> Result<Json<Success>> {
     let (blob_path, blob_tmp) = storage.blob_path(&blob_id);
     if blob_path.exists() {
         return Err(Error::Duplicate);
     }
     let bytes_written = stream_body_to_file(body, blob_path, blob_tmp).await?;
+    
+    // Update metadata with file size and store it
+    metadata = metadata.with_file_size(Some(bytes_written as i64));
+    if let Err(e) = storage.store_metadata(&metadata) {
+        warn!(%blob_id, "Failed to store metadata: {}", e);
+    }
+    
     let bytes = byte_size_str(bytes_written);
     debug!(%blob_id, %bytes, "uploaded blob");
     let success = Success {
@@ -715,7 +786,8 @@ mod tests {
         rq_timeout_secs: u64,
     ) -> (axum::Router, TempDir) {
         let dir = tempdir().unwrap();
-        let fs = FsController::init(dir.path()).unwrap();
+        let metadata_db = dir.path().join("metadata.db");
+        let fs = FsController::init(dir.path(), &metadata_db).unwrap();
         let service = build_service(
             Config {
                 ip_addr: "127.0.0.1:3000".to_string(),
@@ -728,6 +800,7 @@ mod tests {
                 max_data_rq_size: max_data,
                 max_presign_rq_size: max_presign,
                 rq_timeout_secs,
+                metadata_db_path: None,
             },
             fs,
         );
@@ -1018,6 +1091,178 @@ mod tests {
                 .to_lowercase()
                 .contains("duplicate")
         );
+    }
+
+    #[tokio::test]
+    async fn metadata_headers_are_stored_and_applied() {
+        let domain = "https://example.test";
+        let api_key = "k";
+        let secret = b"metadata-test-secret----------------------------";
+        let (app, _guard) =
+            build_test_app(domain, api_key, secret, 100 * 1024, 10 * 1024 * 1024, 10);
+
+        let blob_id = Uuid::new_v4();
+        let path = format!("/upload/{blob_id}");
+        let url = crate::utils::generate_presigned_url("POST", domain, &path, secret, 300);
+        let u = url::Url::parse(&url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        // Upload with Content-Type and Content-Disposition headers
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .header("content-type", "image/png")
+            .header("content-disposition", "attachment; filename=\"test.png\"")
+            .body(Body::from("fake image data"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Download and verify headers are applied
+        let get_path = format!("/files/{blob_id}");
+        let get_url = crate::utils::generate_presigned_url("GET", domain, &get_path, secret, 300);
+        let u = url::Url::parse(&get_url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("{get_path}?{query}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Check that Content-Type and Content-Disposition headers are applied
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            resp.headers().get("content-disposition").unwrap(),
+            "attachment; filename=\"test.png\""
+        );
+
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&bytes[..], b"fake image data");
+    }
+
+    #[tokio::test]
+    async fn chunked_upload_metadata_stored_on_merge() {
+        let domain = "https://example.test";
+        let api_key = "k";
+        let secret = b"chunk-metadata-test-----------------------------";
+        let (app, _guard) =
+            build_test_app(domain, api_key, secret, 100 * 1024, 10 * 1024 * 1024, 10);
+
+        let blob_id = Uuid::new_v4();
+        let total = 2usize;
+
+        // Upload 2 chunks (headers should be ignored for chunks)
+        for (idx, data) in [(1usize, b"hello "), (2, b"world!")].into_iter() {
+            let path = format!("/upload/{blob_id}");
+            let url = crate::utils::generate_presigned_url("POST", domain, &path, secret, 300);
+            let u = url::Url::parse(&url).unwrap();
+            let query = u.query().unwrap_or("");
+
+            let req = HttpRequest::builder()
+                .method("POST")
+                .uri(format!("{path}?{query}"))
+                .header(super::UPLOAD_TYPE, super::UPLOAD_TYPE_CHUNK)
+                .header(super::CHUNK_IDX, idx.to_string())
+                .header(super::CHUNK_TOTAL, total.to_string())
+                .body(Body::from(&data[..]))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // Merge request with metadata headers
+        let path = format!("/upload/{blob_id}");
+        let url = crate::utils::generate_presigned_url("POST", domain, &path, secret, 300);
+        let u = url::Url::parse(&url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .header(super::UPLOAD_TYPE, super::UPLOAD_TYPE_CHUNK)
+            .header(super::CHUNK_TOTAL, total.to_string())
+            .header(super::CHUNK_MERGE, "1")
+            .header("content-type", "text/plain")
+            .header("content-disposition", "inline; filename=\"merged.txt\"")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Download and verify metadata headers are applied
+        let get_path = format!("/files/{blob_id}");
+        let get_url = crate::utils::generate_presigned_url("GET", domain, &get_path, secret, 300);
+        let u = url::Url::parse(&get_url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("{get_path}?{query}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Check headers
+        assert_eq!(resp.headers().get("content-type").unwrap(), "text/plain");
+        assert_eq!(
+            resp.headers().get("content-disposition").unwrap(),
+            "inline; filename=\"merged.txt\""
+        );
+
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&bytes[..], b"hello world!");
+    }
+
+    #[tokio::test]
+    async fn download_without_metadata_uses_defaults() {
+        let domain = "https://example.test";
+        let api_key = "k";
+        let secret = b"no-metadata-test--------------------------------";
+        let (app, _guard) =
+            build_test_app(domain, api_key, secret, 100 * 1024, 10 * 1024 * 1024, 10);
+
+        let blob_id = Uuid::new_v4();
+        let path = format!("/upload/{blob_id}");
+        let url = crate::utils::generate_presigned_url("POST", domain, &path, secret, 300);
+        let u = url::Url::parse(&url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        // Upload without any metadata headers
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("{path}?{query}"))
+            .body(Body::from("some data"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Download and verify default headers are applied
+        let get_path = format!("/files/{blob_id}");
+        let get_url = crate::utils::generate_presigned_url("GET", domain, &get_path, secret, 300);
+        let u = url::Url::parse(&get_url).unwrap();
+        let query = u.query().unwrap_or("");
+
+        let req = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("{get_path}?{query}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Should use default Content-Type, no Content-Disposition
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/octet-stream"
+        );
+        assert!(resp.headers().get("content-disposition").is_none());
     }
 
     #[tokio::test]
