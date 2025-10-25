@@ -76,7 +76,8 @@ This is a minimal S3-style object storage server written in Rust using Axum/Toki
 
 **metadata.rs** - SQLite-based metadata store managing:
 - Content-Type and Content-Disposition headers for proper browser downloads
-- File size and timestamp tracking
+- File size and SHA-256 hash tracking
+- Timestamp tracking for creation and updates
 - ACID-compliant storage with WAL mode
 - Metadata cleanup for orphaned blobs
 
@@ -91,7 +92,7 @@ This is a minimal S3-style object storage server written in Rust using Axum/Toki
 
 1. **Upload**: Client requests pre-signed upload URL via `/presign` (requires API key)
 2. **Storage**: Client uploads to pre-signed URL with optional Content-Type/Content-Disposition headers, data stored atomically via `.tmp` → rename
-3. **Metadata**: Headers are extracted and stored in SQLite database with blob information
+3. **Metadata**: Headers are extracted, SHA-256 hash calculated, and all metadata stored in SQLite database
 4. **Download**: Client requests pre-signed download URL, then downloads via pre-signed URL with original headers restored
 5. **Chunked Uploads**: Multi-part uploads stored in chunks directory, metadata saved during merge operation
 6. **Cleanup**: Background task removes orphaned `.tmp` files, stale chunk directories, and orphaned metadata entries
@@ -137,6 +138,7 @@ The server now supports proper browser downloads by storing and retrieving metad
 
 - **Content-Type**: Set during upload via standard HTTP Content-Type header (e.g., `image/png`, `application/pdf`)
 - **Content-Disposition**: Set during upload via standard HTTP Content-Disposition header (e.g., `attachment; filename="document.pdf"`, `inline`)
+- **SHA-256 Hash**: Automatically calculated during upload for both single and chunked uploads
 - **Backward Compatibility**: Blobs without metadata use default `Content-Type: application/octet-stream`
 - **Database Location**: Metadata stored in SQLite database at `<DATA_DIR>/metadata.db` by default
 

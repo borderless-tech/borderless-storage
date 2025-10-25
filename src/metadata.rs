@@ -14,6 +14,7 @@ pub struct BlobMetadata {
     pub content_type: Option<String>,
     pub content_disposition: Option<String>,
     pub file_size: Option<i64>,
+    pub sha256_hash: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -26,6 +27,7 @@ impl BlobMetadata {
             content_type: None,
             content_disposition: None,
             file_size: None,
+            sha256_hash: None,
             created_at: now,
             updated_at: now,
         }
@@ -43,6 +45,11 @@ impl BlobMetadata {
 
     pub fn with_file_size(mut self, file_size: Option<i64>) -> Self {
         self.file_size = file_size;
+        self
+    }
+
+    pub fn with_sha256_hash(mut self, sha256_hash: Option<String>) -> Self {
+        self.sha256_hash = sha256_hash;
         self
     }
 }
@@ -72,12 +79,19 @@ impl MetadataStore {
                 content_type TEXT,
                 content_disposition TEXT,
                 file_size INTEGER,
+                sha256_hash TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
             "#,
             [],
         )?;
+
+        // Add sha256_hash column if it doesn't exist (migration for existing tables)
+        let _ = conn.execute(
+            "ALTER TABLE blob_metadata ADD COLUMN sha256_hash TEXT",
+            [],
+        );
 
         // Create index on created_at for cleanup operations
         conn.execute(
@@ -99,14 +113,15 @@ impl MetadataStore {
         conn.execute(
             r#"
             INSERT OR REPLACE INTO blob_metadata 
-            (blob_id, content_type, content_disposition, file_size, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            (blob_id, content_type, content_disposition, file_size, sha256_hash, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
             params![
                 metadata.blob_id.to_string(),
                 metadata.content_type,
                 metadata.content_disposition,
                 metadata.file_size,
+                metadata.sha256_hash,
                 metadata.created_at.timestamp(),
                 metadata.updated_at.timestamp(),
             ],
@@ -127,7 +142,7 @@ impl MetadataStore {
 
         let mut stmt = conn.prepare(
             r#"
-            SELECT blob_id, content_type, content_disposition, file_size, created_at, updated_at
+            SELECT blob_id, content_type, content_disposition, file_size, sha256_hash, created_at, updated_at
             FROM blob_metadata
             WHERE blob_id = ?1
             "#,
@@ -138,8 +153,9 @@ impl MetadataStore {
             let content_type: Option<String> = row.get(1)?;
             let content_disposition: Option<String> = row.get(2)?;
             let file_size: Option<i64> = row.get(3)?;
-            let created_at: i64 = row.get(4)?;
-            let updated_at: i64 = row.get(5)?;
+            let sha256_hash: Option<String> = row.get(4)?;
+            let created_at: i64 = row.get(5)?;
+            let updated_at: i64 = row.get(6)?;
 
             Ok(BlobMetadata {
                 blob_id: Uuid::parse_str(&blob_id).map_err(|e| {
@@ -152,6 +168,7 @@ impl MetadataStore {
                 content_type,
                 content_disposition,
                 file_size,
+                sha256_hash,
                 created_at: DateTime::from_timestamp(created_at, 0).unwrap_or_else(|| Utc::now()),
                 updated_at: DateTime::from_timestamp(updated_at, 0).unwrap_or_else(|| Utc::now()),
             })
@@ -263,7 +280,8 @@ mod tests {
         let metadata = BlobMetadata::new(blob_id)
             .with_content_type(Some("image/png".to_string()))
             .with_content_disposition(Some("attachment; filename=\"test.png\"".to_string()))
-            .with_file_size(Some(1024));
+            .with_file_size(Some(1024))
+            .with_sha256_hash(Some("abc123def456".to_string()));
 
         // Store metadata
         store
@@ -284,6 +302,7 @@ mod tests {
             Some("attachment; filename=\"test.png\"".to_string())
         );
         assert_eq!(retrieved.file_size, Some(1024));
+        assert_eq!(retrieved.sha256_hash, Some("abc123def456".to_string()));
     }
 
     #[test]

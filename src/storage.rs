@@ -1,6 +1,6 @@
 use std::{
     fs::{File, create_dir, create_dir_all, read_dir, remove_dir_all, remove_file, rename},
-    io::{self, BufReader, BufWriter, Write},
+    io::{self, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::SystemTime,
@@ -114,7 +114,11 @@ impl FsController {
     /// Merges all chunks into a single file
     ///
     /// Note: Callers must ensure, that all chunks are present - see [`FsController::check_chunks`].
-    pub fn merge_chunks(&self, blob_id: &Uuid, chunk_total: usize) -> Result<usize, io::Error> {
+    pub fn merge_chunks(
+        &self,
+        blob_id: &Uuid,
+        chunk_total: usize,
+    ) -> Result<(usize, [u8; 32]), io::Error> {
         let chunk_sub_dir = self.base_path.join(FS_CHUNK_DIR).join(blob_id.to_string());
         let (final_path, final_tmp) = self.blob_path(blob_id);
 
@@ -127,18 +131,27 @@ impl FsController {
             let part_file = File::open(&chunk)?;
             let mut reader = BufReader::new(part_file);
 
-            // TODO: We need to update the hasher here - is this possible ??
-
-            // Copy the content of the part file into the writer
-            bytes_written += io::copy(&mut reader, &mut writer)?;
+            // Copy the content while updating the hash
+            let mut buffer = [0u8; 8192]; // 8KB buffer
+            loop {
+                let bytes_read = reader.read(&mut buffer)?;
+                if bytes_read == 0 {
+                    break; // EOF
+                }
+                let data = &buffer[..bytes_read];
+                hash.update(data);
+                writer.write_all(data)?;
+                bytes_written += bytes_read;
+            }
         }
 
         // Write blob file and cleanup chunks
         writer.flush()?;
+        let sha256_hash = hash.finalize();
         rename(&final_tmp, &final_path)?;
         remove_dir_all(chunk_sub_dir)?;
 
-        Ok(bytes_written as usize)
+        Ok((bytes_written, sha256_hash.into()))
     }
 
     /// Walks through the [`FS_DATA_DIR`] to find `.tmp` files that can be deleted
@@ -223,6 +236,7 @@ impl FsController {
         Ok(self.metadata_store.get_metadata(blob_id)?)
     }
 
+    #[allow(unused)]
     /// Delete metadata for a blob
     pub fn delete_metadata(&self, blob_id: &Uuid) -> Result<bool, rusqlite::Error> {
         Ok(self.metadata_store.delete_metadata(blob_id)?)
@@ -409,7 +423,7 @@ mod tests {
         }
 
         // Merge
-        let bytes = fs.merge_chunks(&id, total).expect("merge");
+        let (bytes, _sha256) = fs.merge_chunks(&id, total).expect("merge");
         let (final_path, _tmp_path) = fs.blob_path(&id);
 
         assert!(final_path.is_file(), "final blob should exist");
