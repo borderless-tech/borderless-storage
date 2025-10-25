@@ -88,10 +88,7 @@ impl MetadataStore {
         )?;
 
         // Add sha256_hash column if it doesn't exist (migration for existing tables)
-        let _ = conn.execute(
-            "ALTER TABLE blob_metadata ADD COLUMN sha256_hash TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE blob_metadata ADD COLUMN sha256_hash TEXT", []);
 
         // Create index on created_at for cleanup operations
         conn.execute(
@@ -176,6 +173,25 @@ impl MetadataStore {
 
         match rows.next() {
             Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Returns only the hash of the blob-id (if any)
+    pub fn get_sha256(&self, blob_id: &Uuid) -> SqliteResult<Option<String>> {
+        let conn = self.connection.lock();
+        
+        let mut stmt = conn.prepare(
+            "SELECT sha256_hash FROM blob_metadata WHERE blob_id = ?1"
+        )?;
+
+        let mut rows = stmt.query_map(params![blob_id.to_string()], |row| {
+            let sha256_hash: Option<String> = row.get(0)?;
+            Ok(sha256_hash)
+        })?;
+
+        match rows.next() {
+            Some(row) => row,
             None => Ok(None),
         }
     }
@@ -353,6 +369,38 @@ mod tests {
         for blob_id in &blob_ids {
             assert!(retrieved_ids.contains(blob_id));
         }
+    }
+
+    #[test]
+    fn test_get_sha256_hash() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let store = MetadataStore::init(&db_path).unwrap();
+
+        let blob_id = Uuid::new_v4();
+        let expected_hash = "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456";
+        
+        // Store metadata with hash
+        let metadata = BlobMetadata::new(blob_id)
+            .with_sha256_hash(Some(expected_hash.to_string()));
+        store.store_metadata(&metadata).unwrap();
+
+        // Test retrieving the hash
+        let retrieved_hash = store.get_sha256(&blob_id).unwrap();
+        assert_eq!(retrieved_hash, Some(expected_hash.to_string()));
+
+        // Test non-existent blob
+        let non_existent_id = Uuid::new_v4();
+        let no_hash = store.get_sha256(&non_existent_id).unwrap();
+        assert_eq!(no_hash, None);
+
+        // Test blob with no hash stored
+        let blob_id_no_hash = Uuid::new_v4();
+        let metadata_no_hash = BlobMetadata::new(blob_id_no_hash);
+        store.store_metadata(&metadata_no_hash).unwrap();
+        
+        let retrieved_no_hash = store.get_sha256(&blob_id_no_hash).unwrap();
+        assert_eq!(retrieved_no_hash, None);
     }
 
     #[test]

@@ -37,7 +37,7 @@ use uuid::Uuid;
 
 use self::error::Error;
 use crate::{
-    metadata::BlobMetadata,
+    metadata::{BlobMetadata, MetadataStore},
     storage::FsController,
     utils::{
         byte_size_str, extract_sig_from_query, generate_presigned_url, verify_presigned_signature,
@@ -104,10 +104,11 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
                 .get::<RequestId>()
                 .and_then(|id| id.header_value().to_str().ok())
                 .unwrap_or("-");
+            // NOTE: We strip the query from the request, to avoid leaking presigned urls into our logs
             tracing::info_span!("request",
                        request_id = %rid,
                        method = %req.method(),
-                       uri = %req.uri()
+                       uri = %req.uri().path()
             )
         })
         .on_request(DefaultOnRequest::new().level(Level::DEBUG))
@@ -171,6 +172,7 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
         hmac_secret,
         domain: config.domain,
         api_key: config.presign_api_key,
+        metadata_store: fs_controller.get_metadata_store(),
     });
 
     let api_key_protected = Router::new()
@@ -241,6 +243,8 @@ struct AuthState {
     domain: String,
     /// API-Key to generate pre-signed urls
     api_key: String,
+    /// Metadata storage (to access sha256 hash)
+    metadata_store: Arc<MetadataStore>,
 }
 
 async fn reject_404() -> StatusCode {
@@ -739,6 +743,8 @@ pub struct PresignResponse {
     pub success: bool,
     pub action: PresignAction,
     pub blob_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256_hash: Option<String>,
     pub url: String,
     pub method: String,
     pub expires_in: u64, // seconds
@@ -768,17 +774,18 @@ async fn presign_url(
         .min(MAX_EXPIRY_SECS);
 
     // Check upload action
-    let (method, path, blob_id) = match presign.action {
+    let (method, path, blob_id, sha256_hash) = match presign.action {
         PresignAction::Upload => {
             let blob_id = presign.blob_id.unwrap_or_else(Uuid::now_v7);
-            ("POST", format!("/upload/{blob_id}"), blob_id)
+            ("POST", format!("/upload/{blob_id}"), blob_id, None)
         }
         PresignAction::Download => {
             let blob_id = match presign.blob_id {
                 Some(id) => id,
                 None => return Err(Error::MissingBlobId),
             };
-            ("GET", format!("/files/{blob_id}"), blob_id)
+            let sha256_hash = auth.metadata_store.get_sha256(&blob_id).ok().flatten();
+            ("GET", format!("/files/{blob_id}"), blob_id, sha256_hash)
         }
     };
     debug!(%expires_in, %method, %path, %blob_id, "presigning url");
@@ -790,6 +797,7 @@ async fn presign_url(
         success: true,
         action: presign.action,
         blob_id,
+        sha256_hash,
         url: signed_url,
         method: method.to_string(),
         expires_in,

@@ -49,6 +49,11 @@ impl FsController {
         })
     }
 
+    /// Returns a copy of the pointer to the metadata store
+    pub fn get_metadata_store(&self) -> Arc<MetadataStore> {
+        self.metadata_store.clone()
+    }
+
     /// Returns the path and tmp-path for a storage blob
     pub fn blob_path(&self, blob_id: &Uuid) -> (PathBuf, PathBuf) {
         let full = self.base_path.join(FS_DATA_DIR).join(blob_id.to_string());
