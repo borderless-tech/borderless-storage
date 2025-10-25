@@ -6,10 +6,11 @@ use std::{
     time::SystemTime,
 };
 
+use anyhow::Context;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
-use crate::metadata::{MetadataStore, BlobMetadata};
+use crate::metadata::{BlobMetadata, MetadataStore};
 
 /// Sub-Directory, where all data is stored to
 const FS_DATA_DIR: &str = "full";
@@ -30,14 +31,17 @@ pub struct FsController {
 }
 
 impl FsController {
-    pub fn init(base_path: &Path, metadata_db_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn init(
+        base_path: &Path,
+        metadata_db_path: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Create base directories
         create_dir_all(base_path.join(FS_DATA_DIR))?;
         create_dir_all(base_path.join(FS_CHUNK_DIR))?;
-        
+
         // Initialize metadata store
         let metadata_store = MetadataStore::init(metadata_db_path)?;
-        
+
         Ok(FsController {
             base_path: Arc::new(base_path.to_path_buf()),
             metadata_store: Arc::new(metadata_store),
@@ -205,48 +209,40 @@ impl FsController {
     }
 
     /// Store metadata for a blob
-    pub fn store_metadata(&self, metadata: &BlobMetadata) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn store_metadata(&self, metadata: &BlobMetadata) -> Result<(), rusqlite::Error> {
         self.metadata_store.store_metadata(metadata)?;
         Ok(())
     }
 
     /// Retrieve metadata for a blob
-    pub fn get_metadata(&self, blob_id: &Uuid) -> Result<Option<BlobMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn get_metadata(&self, blob_id: &Uuid) -> Result<Option<BlobMetadata>, rusqlite::Error> {
         Ok(self.metadata_store.get_metadata(blob_id)?)
     }
 
     /// Delete metadata for a blob
-    pub fn delete_metadata(&self, blob_id: &Uuid) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn delete_metadata(&self, blob_id: &Uuid) -> Result<bool, rusqlite::Error> {
         Ok(self.metadata_store.delete_metadata(blob_id)?)
     }
 
     /// Cleanup orphaned metadata entries
-    pub fn cleanup_orphaned_metadata(&self, ttl_orphan_secs: u64) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-        let now = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let cutoff_timestamp = now.saturating_sub(ttl_orphan_secs) as i64;
-        
+    pub fn cleanup_orphaned_metadata(&self) -> Result<usize, rusqlite::Error> {
         // Get all blob IDs with metadata
         let blob_ids = self.metadata_store.get_all_blob_ids()?;
         let mut deleted_count = 0;
-        
+
         // Check if the blob files still exist
         for blob_id in blob_ids {
             let (blob_path, _) = self.blob_path(&blob_id);
             if !blob_path.exists() {
                 // Blob file doesn't exist, remove its metadata
                 if self.metadata_store.delete_metadata(&blob_id)? {
+                    debug!("🧹 Removing metadata of {}", blob_id);
                     deleted_count += 1;
                 }
             }
         }
-        
-        // Also clean up old metadata entries based on timestamp
-        let timestamp_deleted = self.metadata_store.cleanup_metadata_before(cutoff_timestamp)?;
-        
-        Ok(deleted_count + timestamp_deleted)
+
+        Ok(deleted_count)
     }
 }
 
@@ -269,8 +265,9 @@ pub async fn cleanup_routine(fs_controller: FsController, ttl_orphan_secs: u64) 
         }
 
         // Clean up orphaned metadata entries
-        let orphaned_metadata = fs_controller.cleanup_orphaned_metadata(ttl_orphan_secs)
-            .map_err(|e| anyhow::anyhow!("Failed to cleanup orphaned metadata: {}", e))?;
+        let orphaned_metadata = fs_controller
+            .cleanup_orphaned_metadata()
+            .context("Failed to cleanup orphaned metadata")?;
 
         info!(
             "🧹 Removed {} orphaned files, {} orphaned chunk directories, and {} orphaned metadata entries",
@@ -496,7 +493,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let metadata_db = dir.path().join("metadata.db");
         // Create the base structure via FsController::init
-        (FsController::init(dir.path(), &metadata_db).expect("init fs"), dir)
+        (
+            FsController::init(dir.path(), &metadata_db).expect("init fs"),
+            dir,
+        )
     }
 
     /// Create a normal (non-tmp) blob and a tmp blob in `full/`, plus a chunk dir

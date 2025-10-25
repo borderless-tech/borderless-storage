@@ -12,7 +12,7 @@ use axum::{
     extract::{Path, Request, State},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
-        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -305,7 +305,10 @@ async fn require_presign_auth(
 mod error {
     use super::Success;
     use axum::{
-        http::{StatusCode, header::CONTENT_TYPE},
+        http::{
+            StatusCode,
+            header::{CONTENT_TYPE, ToStrError},
+        },
         response::{IntoResponse, Response},
     };
     use thiserror::Error;
@@ -321,6 +324,8 @@ mod error {
         NotFound,
         #[error("Missing required parameter 'blob_id'")]
         MissingBlobId,
+        #[error("Header contained non-ascii value: {0}")]
+        InvalidHeader(#[from] ToStrError),
         #[error("{0}")]
         Unauthorized(String),
         #[error("failed to parse header values: {0}")]
@@ -406,8 +411,7 @@ async fn read_blob(
     };
 
     // Retrieve metadata and apply to response headers
-    let mut response_builder = Response::builder()
-        .header(CACHE_CONTROL, cache_hdr);
+    let mut response_builder = Response::builder().header(CACHE_CONTROL, cache_hdr);
 
     // Try to get metadata and apply Content-Type and Content-Disposition
     match storage.get_metadata(&blob_id) {
@@ -416,12 +420,14 @@ async fn read_blob(
             if let Some(content_type) = &metadata.content_type {
                 response_builder = response_builder.header(CONTENT_TYPE, content_type);
             } else {
-                response_builder = response_builder.header(CONTENT_TYPE, "application/octet-stream");
+                response_builder =
+                    response_builder.header(CONTENT_TYPE, "application/octet-stream");
             }
 
             // Apply Content-Disposition if available
             if let Some(content_disposition) = &metadata.content_disposition {
-                response_builder = response_builder.header(axum::http::header::CONTENT_DISPOSITION, content_disposition);
+                response_builder =
+                    response_builder.header(CONTENT_DISPOSITION, content_disposition);
             }
 
             debug!(
@@ -516,20 +522,22 @@ impl UploadType {
 }
 
 /// Extract metadata from request headers
-fn extract_metadata_from_headers(headers: &HeaderMap, blob_id: Uuid) -> BlobMetadata {
+fn extract_metadata_from_headers(headers: &HeaderMap, blob_id: Uuid) -> Result<BlobMetadata> {
     let content_type = headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|h| h.to_str().ok())
+        .get(CONTENT_TYPE)
+        .map(|h| h.to_str())
+        .transpose()?
         .map(|s| s.to_string());
 
     let content_disposition = headers
-        .get(axum::http::header::CONTENT_DISPOSITION)
-        .and_then(|h| h.to_str().ok())
+        .get(CONTENT_DISPOSITION)
+        .map(|h| h.to_str())
+        .transpose()?
         .map(|s| s.to_string());
 
-    BlobMetadata::new(blob_id)
+    Ok(BlobMetadata::new(blob_id)
         .with_content_type(content_type)
-        .with_content_disposition(content_disposition)
+        .with_content_disposition(content_disposition))
 }
 
 /// General entrypoint for the upload logic
@@ -540,8 +548,8 @@ async fn upload_data(
     body: Body,
 ) -> Result<Json<Success>> {
     // 1. Extract metadata from headers
-    let metadata = extract_metadata_from_headers(&headers, blob_id);
-    
+    let metadata = extract_metadata_from_headers(&headers, blob_id)?;
+
     // 2. Determine file upload type from headers
     let upload_type = UploadType::from_headers(&headers)?;
 
@@ -620,13 +628,13 @@ async fn merge_chunks(
     }
 
     let bytes_written = storage.merge_chunks(&blob_id, chunk_total)?;
-    
+
     // Update metadata with file size and store it
     metadata = metadata.with_file_size(Some(bytes_written as i64));
     if let Err(e) = storage.store_metadata(&metadata) {
         warn!(%blob_id, "Failed to store metadata: {}", e);
     }
-    
+
     let bytes = byte_size_str(bytes_written);
     debug!(%blob_id, %bytes, "merged chunks");
     let success = Success {
@@ -640,19 +648,24 @@ async fn merge_chunks(
 }
 
 /// Helper function to perform the oneshot (full) upload
-async fn upload_full(storage: FsController, blob_id: Uuid, mut metadata: BlobMetadata, body: Body) -> Result<Json<Success>> {
+async fn upload_full(
+    storage: FsController,
+    blob_id: Uuid,
+    mut metadata: BlobMetadata,
+    body: Body,
+) -> Result<Json<Success>> {
     let (blob_path, blob_tmp) = storage.blob_path(&blob_id);
     if blob_path.exists() {
         return Err(Error::Duplicate);
     }
     let bytes_written = stream_body_to_file(body, blob_path, blob_tmp).await?;
-    
+
     // Update metadata with file size and store it
     metadata = metadata.with_file_size(Some(bytes_written as i64));
     if let Err(e) = storage.store_metadata(&metadata) {
         warn!(%blob_id, "Failed to store metadata: {}", e);
     }
-    
+
     let bytes = byte_size_str(bytes_written);
     debug!(%blob_id, %bytes, "uploaded blob");
     let success = Success {
@@ -1133,10 +1146,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Check that Content-Type and Content-Disposition headers are applied
-        assert_eq!(
-            resp.headers().get("content-type").unwrap(),
-            "image/png"
-        );
+        assert_eq!(resp.headers().get("content-type").unwrap(), "image/png");
         assert_eq!(
             resp.headers().get("content-disposition").unwrap(),
             "attachment; filename=\"test.png\""

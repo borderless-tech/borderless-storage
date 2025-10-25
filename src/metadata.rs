@@ -1,7 +1,8 @@
-use std::{path::Path, sync::Mutex};
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, Result as SqliteResult};
+use parking_lot::Mutex;
+use rusqlite::{Connection, Result as SqliteResult, params};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 use uuid::Uuid;
@@ -56,8 +57,8 @@ impl MetadataStore {
     /// Initialize the metadata store with SQLite database at the given path
     pub fn init(db_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let conn = Connection::open(db_path)?;
-        
-        // Enable WAL mode for better concurrent access  
+
+        // Enable WAL mode for better concurrent access
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "cache_size", 1000)?;
@@ -93,8 +94,8 @@ impl MetadataStore {
 
     /// Store metadata for a blob
     pub fn store_metadata(&self, metadata: &BlobMetadata) -> SqliteResult<()> {
-        let conn = self.connection.lock().unwrap();
-        
+        let conn = self.connection.lock();
+
         conn.execute(
             r#"
             INSERT OR REPLACE INTO blob_metadata 
@@ -122,8 +123,8 @@ impl MetadataStore {
 
     /// Retrieve metadata for a blob
     pub fn get_metadata(&self, blob_id: &Uuid) -> SqliteResult<Option<BlobMetadata>> {
-        let conn = self.connection.lock().unwrap();
-        
+        let conn = self.connection.lock();
+
         let mut stmt = conn.prepare(
             r#"
             SELECT blob_id, content_type, content_disposition, file_size, created_at, updated_at
@@ -151,10 +152,8 @@ impl MetadataStore {
                 content_type,
                 content_disposition,
                 file_size,
-                created_at: DateTime::from_timestamp(created_at, 0)
-                    .unwrap_or_else(|| Utc::now()),
-                updated_at: DateTime::from_timestamp(updated_at, 0)
-                    .unwrap_or_else(|| Utc::now()),
+                created_at: DateTime::from_timestamp(created_at, 0).unwrap_or_else(|| Utc::now()),
+                updated_at: DateTime::from_timestamp(updated_at, 0).unwrap_or_else(|| Utc::now()),
             })
         })?;
 
@@ -166,8 +165,8 @@ impl MetadataStore {
 
     /// Delete metadata for a blob
     pub fn delete_metadata(&self, blob_id: &Uuid) -> SqliteResult<bool> {
-        let conn = self.connection.lock().unwrap();
-        
+        let conn = self.connection.lock();
+
         let changes = conn.execute(
             "DELETE FROM blob_metadata WHERE blob_id = ?1",
             params![blob_id.to_string()],
@@ -180,8 +179,8 @@ impl MetadataStore {
     /// Get all blob IDs that have metadata but might be orphaned
     /// (for cleanup purposes)
     pub fn get_all_blob_ids(&self) -> SqliteResult<Vec<Uuid>> {
-        let conn = self.connection.lock().unwrap();
-        
+        let conn = self.connection.lock();
+
         let mut stmt = conn.prepare("SELECT blob_id FROM blob_metadata")?;
         let rows = stmt.query_map([], |row| {
             let blob_id: String = row.get(0)?;
@@ -202,52 +201,38 @@ impl MetadataStore {
         Ok(blob_ids)
     }
 
-    /// Delete metadata for blobs created before a certain timestamp
-    /// Returns the number of deleted rows
-    pub fn cleanup_metadata_before(&self, before_timestamp: i64) -> SqliteResult<usize> {
-        let conn = self.connection.lock().unwrap();
-        
-        let changes = conn.execute(
-            "DELETE FROM blob_metadata WHERE created_at < ?1",
-            params![before_timestamp],
-        )?;
+    // /// Get database statistics
+    // pub fn get_stats(&self) -> SqliteResult<MetadataStats> {
+    //     let conn = self.connection.lock();
 
-        debug!(before_timestamp, changes, "cleaned up old metadata entries");
-        Ok(changes)
-    }
+    //     let mut stmt = conn.prepare(
+    //         r#"
+    //         SELECT
+    //             COUNT(*) as total_entries,
+    //             COUNT(content_type) as entries_with_content_type,
+    //             COUNT(content_disposition) as entries_with_content_disposition
+    //         FROM blob_metadata
+    //         "#,
+    //     )?;
 
-    /// Get database statistics
-    pub fn get_stats(&self) -> SqliteResult<MetadataStats> {
-        let conn = self.connection.lock().unwrap();
-        
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT 
-                COUNT(*) as total_entries,
-                COUNT(content_type) as entries_with_content_type,
-                COUNT(content_disposition) as entries_with_content_disposition
-            FROM blob_metadata
-            "#,
-        )?;
+    //     let stats = stmt.query_row([], |row| {
+    //         Ok(MetadataStats {
+    //             total_entries: row.get(0)?,
+    //             entries_with_content_type: row.get(1)?,
+    //             entries_with_content_disposition: row.get(2)?,
+    //         })
+    //     })?;
 
-        let stats = stmt.query_row([], |row| {
-            Ok(MetadataStats {
-                total_entries: row.get(0)?,
-                entries_with_content_type: row.get(1)?,
-                entries_with_content_disposition: row.get(2)?,
-            })
-        })?;
-
-        Ok(stats)
-    }
+    //     Ok(stats)
+    // }
 }
 
-#[derive(Debug)]
-pub struct MetadataStats {
-    pub total_entries: i64,
-    pub entries_with_content_type: i64,
-    pub entries_with_content_disposition: i64,
-}
+// #[derive(Debug)]
+// pub struct MetadataStats {
+//     pub total_entries: i64,
+//     pub entries_with_content_type: i64,
+//     pub entries_with_content_disposition: i64,
+// }
 
 #[cfg(test)]
 mod tests {
@@ -258,9 +243,9 @@ mod tests {
     fn test_metadata_store_init() {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        
+
         let store = MetadataStore::init(&db_path).expect("failed to init metadata store");
-        
+
         // Should be able to get stats from empty database
         let stats = store.get_stats().expect("failed to get stats");
         assert_eq!(stats.total_entries, 0);
@@ -279,16 +264,23 @@ mod tests {
             .with_file_size(Some(1024));
 
         // Store metadata
-        store.store_metadata(&metadata).expect("failed to store metadata");
+        store
+            .store_metadata(&metadata)
+            .expect("failed to store metadata");
 
         // Retrieve metadata
-        let retrieved = store.get_metadata(&blob_id).expect("failed to get metadata");
+        let retrieved = store
+            .get_metadata(&blob_id)
+            .expect("failed to get metadata");
         assert!(retrieved.is_some());
-        
+
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.blob_id, blob_id);
         assert_eq!(retrieved.content_type, Some("image/png".to_string()));
-        assert_eq!(retrieved.content_disposition, Some("attachment; filename=\"test.png\"".to_string()));
+        assert_eq!(
+            retrieved.content_disposition,
+            Some("attachment; filename=\"test.png\"".to_string())
+        );
         assert_eq!(retrieved.file_size, Some(1024));
     }
 
@@ -326,7 +318,7 @@ mod tests {
         let store = MetadataStore::init(&db_path).unwrap();
 
         let blob_ids = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
-        
+
         // Store metadata for each blob
         for blob_id in &blob_ids {
             let metadata = BlobMetadata::new(*blob_id);
@@ -336,7 +328,7 @@ mod tests {
         // Get all blob IDs
         let retrieved_ids = store.get_all_blob_ids().unwrap();
         assert_eq!(retrieved_ids.len(), 3);
-        
+
         for blob_id in &blob_ids {
             assert!(retrieved_ids.contains(blob_id));
         }
@@ -349,8 +341,8 @@ mod tests {
         let store = MetadataStore::init(&db_path).unwrap();
 
         // Add metadata with different combinations
-        let metadata1 = BlobMetadata::new(Uuid::new_v4())
-            .with_content_type(Some("text/plain".to_string()));
+        let metadata1 =
+            BlobMetadata::new(Uuid::new_v4()).with_content_type(Some("text/plain".to_string()));
         let metadata2 = BlobMetadata::new(Uuid::new_v4())
             .with_content_disposition(Some("attachment; filename=\"test.txt\"".to_string()));
         let metadata3 = BlobMetadata::new(Uuid::new_v4())
