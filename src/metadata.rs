@@ -201,38 +201,40 @@ impl MetadataStore {
         Ok(blob_ids)
     }
 
-    // /// Get database statistics
-    // pub fn get_stats(&self) -> SqliteResult<MetadataStats> {
-    //     let conn = self.connection.lock();
+    /// Get database statistics (used for testing)
+    #[cfg(test)]
+    pub fn get_stats(&self) -> SqliteResult<MetadataStats> {
+        let conn = self.connection.lock();
 
-    //     let mut stmt = conn.prepare(
-    //         r#"
-    //         SELECT
-    //             COUNT(*) as total_entries,
-    //             COUNT(content_type) as entries_with_content_type,
-    //             COUNT(content_disposition) as entries_with_content_disposition
-    //         FROM blob_metadata
-    //         "#,
-    //     )?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                COUNT(*) as total_entries,
+                COUNT(content_type) as entries_with_content_type,
+                COUNT(content_disposition) as entries_with_content_disposition
+            FROM blob_metadata
+            "#,
+        )?;
 
-    //     let stats = stmt.query_row([], |row| {
-    //         Ok(MetadataStats {
-    //             total_entries: row.get(0)?,
-    //             entries_with_content_type: row.get(1)?,
-    //             entries_with_content_disposition: row.get(2)?,
-    //         })
-    //     })?;
+        let stats = stmt.query_row([], |row| {
+            Ok(MetadataStats {
+                total_entries: row.get(0)?,
+                entries_with_content_type: row.get(1)?,
+                entries_with_content_disposition: row.get(2)?,
+            })
+        })?;
 
-    //     Ok(stats)
-    // }
+        Ok(stats)
+    }
 }
 
-// #[derive(Debug)]
-// pub struct MetadataStats {
-//     pub total_entries: i64,
-//     pub entries_with_content_type: i64,
-//     pub entries_with_content_disposition: i64,
-// }
+#[cfg(test)]
+#[derive(Debug)]
+pub struct MetadataStats {
+    pub total_entries: i64,
+    pub entries_with_content_type: i64,
+    pub entries_with_content_disposition: i64,
+}
 
 #[cfg(test)]
 mod tests {
