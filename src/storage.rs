@@ -90,11 +90,8 @@ impl FsController {
         }
 
         if !old_full_dir.exists() {
-            // Serious error
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "Neither new nor old directory structure found.",
-            ));
+            // Nothing to migrate
+            return Ok(());
         }
 
         // Step 2: Migrate files to new bucket dir

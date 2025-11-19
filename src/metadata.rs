@@ -948,8 +948,8 @@ mod tests {
         let metadata = BlobMetadata::new(bucket.to_string(), blob_id)
             .with_content_type(Some("image/png".to_string()))
             .with_content_disposition(Some("attachment; filename=\"test.png\"".to_string()))
-            .with_file_size(Some(1024))
-            .with_sha256_hash(Some("abc123def456".to_string()));
+            .with_file_size(1024)
+            .with_sha256_hash("abc123def456".to_string());
 
         // Store metadata
         store
@@ -1042,7 +1042,7 @@ mod tests {
 
         // Store metadata with hash
         let metadata = BlobMetadata::new(bucket.to_string(), blob_id)
-            .with_sha256_hash(Some(expected_hash.to_string()));
+            .with_sha256_hash(expected_hash.to_string());
         store.store_metadata(&metadata).unwrap();
 
         // Test retrieving the hash
