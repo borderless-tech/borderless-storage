@@ -67,29 +67,6 @@
 //! > See unit tests in `src/utils.rs` for round‑trip samples and expiry checks.
 //!
 //! ---
-//! ## 🧩 API Shape (High‑Level)
-//!
-//! This project follows an S3‑style flow with **pre‑signed operations**. While the concrete routes may evolve, the intended patterns are:
-//!
-//! * **Single‑part upload**
-//!
-//!   * Client obtains a pre‑signed `PUT` URL for a target object path (e.g., `/objects/{uuid}`)
-//!   * Client `PUT`s bytes to that URL within `expires`
-//!   * Server writes to `<uuid>.tmp` then atomically renames to `<uuid>`
-//!
-//! * **Chunked (multi‑part) upload**
-//!
-//!   * Client obtains N pre‑signed `PUT` URLs for `/objects/{uuid}/chunks/{idx}/{total}`
-//!   * Upload each chunk independently
-//!   * Server merges when all parts are present
-//!
-//! * **Download**
-//!
-//!   * Client obtains a pre‑signed `GET` URL for `/objects/{uuid}` and downloads the blob
-//!
-//! All pre‑signed requests include `?expires=...&sig=...` and are validated server‑side.
-//!
-//! ---
 //!
 //! ## 🧹 Cleanup Task
 //!
@@ -173,8 +150,12 @@ async fn main() -> Result<()> {
     info!("🌐 Request-Timeout: {}s", config.rq_timeout_secs);
 
     let metadata_db_path = config.get_metadata_db_path();
-    let fs_controller = FsController::init(&config.data_dir, &metadata_db_path)
-        .map_err(|e| anyhow::anyhow!("Failed to initialize storage controller: {}", e))?;
+    let fs_controller = FsController::init(
+        &config.data_dir,
+        &metadata_db_path,
+        config.create_bucket_symlinks,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to initialize storage controller: {}", e))?;
 
     // --- Create shutdown token
     let shutdown_token = CancellationToken::new();

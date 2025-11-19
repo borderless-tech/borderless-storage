@@ -1,13 +1,42 @@
 use std::{
     fs::File,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine, prelude::BASE64_URL_SAFE};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
+
+/// Validates and normalizes a bucket name according to S3-style naming rules.
+///
+/// Rules:
+/// - Only lowercase letters (a-z), numbers (0-9), hyphens (-), and underscores (_)
+/// - Must be at least 1 character long
+/// - Will be converted to lowercase
+///
+/// Returns the normalized (lowercased) bucket name or an error if invalid.
+pub fn normalize_and_validate_bucket_name(bucket: &str) -> Result<String, String> {
+    if bucket.is_empty() {
+        return Err("Bucket name cannot be empty".to_string());
+    }
+
+    let normalized = bucket.to_lowercase();
+
+    // Check if all characters are valid (a-z, 0-9, -, _)
+    if !normalized
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "Bucket name '{}' contains invalid characters. Only lowercase letters, numbers, hyphens, and underscores are allowed",
+            bucket
+        ));
+    }
+
+    Ok(normalized)
+}
 
 /// Checks if a directory exists, and if we have write access to it
 pub fn check_directory_access(path: &Path) -> Result<()> {
@@ -175,6 +204,60 @@ pub fn extract_sig_from_query(query: &str) -> Result<(u64, String), String> {
     }
 }
 
+/// Calculate relative path from one path to another
+/// This works even if the paths don't exist yet
+pub fn calculate_relative_path(from: &Path, to: &Path) -> PathBuf {
+    let from_components: Vec<_> = from.parent().unwrap_or(from).components().collect();
+    let to_components: Vec<_> = to.components().collect();
+
+    // Find common prefix length
+    let common_prefix_len = from_components
+        .iter()
+        .zip(to_components.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // Calculate how many ".." we need (components in 'from' after common prefix)
+    let up_count = from_components.len() - common_prefix_len;
+
+    // Build the relative path
+    let mut relative = PathBuf::new();
+    for _ in 0..up_count {
+        relative.push("..");
+    }
+
+    // Add the remaining components from 'to'
+    for component in &to_components[common_prefix_len..] {
+        relative.push(component);
+    }
+
+    // If the result is empty, it means they're the same path
+    if relative.as_os_str().is_empty() {
+        relative.push(".");
+    }
+
+    relative
+}
+
+/// Calculate SHA-256 hash of a file
+pub fn calculate_file_hash(path: &Path) -> Result<[u8; 32], std::io::Error> {
+    use std::io::Read;
+
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(hasher.finalize().into())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{thread::sleep, time::Duration};
@@ -336,5 +419,92 @@ mod tests {
         // Days range (floors to whole days with ~ prefix)
         assert_eq!(large_secs_str(86_400), "~1 days");
         assert_eq!(large_secs_str(172_800), "~2 days");
+    }
+
+    #[test]
+    fn test_calculate_relative_path() {
+        // Test basic case: buckets/default/blob-id -> content/hash
+        let from = Path::new("db/buckets/default/blob-id");
+        let to = Path::new("db/content/hash");
+        let relative = calculate_relative_path(from, to);
+        assert_eq!(relative, Path::new("../../content/hash"));
+
+        // Test different bucket depth
+        let from = Path::new("data/buckets/my-bucket/nested/blob-id");
+        let to = Path::new("data/content/hash");
+        let relative = calculate_relative_path(from, to);
+        assert_eq!(relative, Path::new("../../../content/hash"));
+
+        // Test when paths are at different base directories
+        let from = Path::new("/var/lib/app/buckets/default/blob-id");
+        let to = Path::new("/var/lib/app/content/hash");
+        let relative = calculate_relative_path(from, to);
+        assert_eq!(relative, Path::new("../../content/hash"));
+
+        // Test same directory
+        let from = Path::new("db/content/file1");
+        let to = Path::new("db/content/file2");
+        let relative = calculate_relative_path(from, to);
+        assert_eq!(relative, Path::new("file2"));
+
+        // Test when 'to' is in a subdirectory
+        let from = Path::new("db/file");
+        let to = Path::new("db/subdir/content/hash");
+        let relative = calculate_relative_path(from, to);
+        assert_eq!(relative, Path::new("subdir/content/hash"));
+
+        // Test with completely different paths (no common prefix except root)
+        let from = Path::new("/home/user/data/blob");
+        let to = Path::new("/var/lib/content/hash");
+        let relative = calculate_relative_path(from, to);
+        assert_eq!(relative, Path::new("../../../var/lib/content/hash"));
+    }
+
+    #[test]
+    fn test_bucket_name_validation() {
+        // Valid bucket names
+        assert_eq!(
+            normalize_and_validate_bucket_name("default").unwrap(),
+            "default"
+        );
+        assert_eq!(
+            normalize_and_validate_bucket_name("my-bucket").unwrap(),
+            "my-bucket"
+        );
+        assert_eq!(
+            normalize_and_validate_bucket_name("my_bucket").unwrap(),
+            "my_bucket"
+        );
+        assert_eq!(
+            normalize_and_validate_bucket_name("bucket123").unwrap(),
+            "bucket123"
+        );
+        assert_eq!(
+            normalize_and_validate_bucket_name("bucket-123_test").unwrap(),
+            "bucket-123_test"
+        );
+
+        // Uppercase should be normalized to lowercase
+        assert_eq!(
+            normalize_and_validate_bucket_name("MyBucket").unwrap(),
+            "mybucket"
+        );
+        assert_eq!(
+            normalize_and_validate_bucket_name("TEST-BUCKET").unwrap(),
+            "test-bucket"
+        );
+        assert_eq!(
+            normalize_and_validate_bucket_name("MixedCase_123").unwrap(),
+            "mixedcase_123"
+        );
+
+        // Invalid bucket names
+        assert!(normalize_and_validate_bucket_name("").is_err());
+        assert!(normalize_and_validate_bucket_name("bucket name").is_err()); // space
+        assert!(normalize_and_validate_bucket_name("bucket.name").is_err()); // dot
+        assert!(normalize_and_validate_bucket_name("bucket/name").is_err()); // slash
+        assert!(normalize_and_validate_bucket_name("bucket\\name").is_err()); // backslash
+        assert!(normalize_and_validate_bucket_name("bucket@name").is_err()); // special char
+        assert!(normalize_and_validate_bucket_name("bucket#name").is_err()); // hash
     }
 }

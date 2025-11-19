@@ -9,14 +9,14 @@ use std::{
 use axum::{
     Extension, Json, Router,
     body::Body,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post, put},
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,8 @@ use crate::{
     metadata::{BlobMetadata, MetadataStore},
     storage::FsController,
     utils::{
-        byte_size_str, extract_sig_from_query, generate_presigned_url, verify_presigned_signature,
+        byte_size_str, extract_sig_from_query, generate_presigned_url,
+        normalize_and_validate_bucket_name, verify_presigned_signature,
     },
 };
 
@@ -145,7 +146,13 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
 
     let cors = CorsLayer::new()
         .allow_origin(allowed_origins)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             AUTHORIZATION,
             CONTENT_TYPE,
@@ -176,32 +183,78 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
         metadata_store: fs_controller.get_metadata_store(),
     });
 
-    let api_key_protected = Router::new()
+    let legacy_api_key_protected = Router::new()
         .route("/presign", post(presign_url))
         .layer(middleware::from_fn_with_state(
             auth.clone(),
             require_api_key_auth,
         ))
         .layer(RequestBodyLimitLayer::new(config.max_presign_rq_size))
-        .layer(no_store.clone()) // Never cache presign responses
+        .layer(no_store.clone()) // Never cache presign responses ( IMPORTANT! )
         .with_state(auth.clone());
 
-    let pre_sign_upload = Router::new()
-        .route("/upload/{blob_id}", post(upload_data))
+    // Legacy routes for backward compatibility (use "default" bucket)
+    let legacy_upload = Router::new()
+        .route("/upload/{blob_id}", post(legacy_upload_data))
+        .route("/upload/{blob_id}", put(legacy_upload_data_put))
         .layer(middleware::from_fn_with_state(
             auth.clone(),
             require_presign_auth,
         ))
         .layer(RequestBodyLimitLayer::new(config.max_data_rq_size))
-        .layer(no_store.clone()) // Never cache responses with presigned-urls
+        .layer(no_store.clone()) // Never cache upload responses
         .with_state(fs_controller.clone());
 
-    // NOTE: The download route sets the cache header directly in the response
-    let pre_sign_download = Router::new()
-        .route("/files/{blob_id}", get(read_blob))
-        .layer(middleware::from_fn_with_state(auth, require_presign_auth))
+    let legacy_files = Router::new()
+        .route("/files/{blob_id}", get(legacy_read_blob))
+        .route("/files/{blob_id}", delete(legacy_delete_blob))
+        .layer(middleware::from_fn_with_state(
+            auth.clone(),
+            require_presign_auth,
+        ))
         .layer(RequestBodyLimitLayer::new(config.max_data_rq_size))
+        .with_state(fs_controller.clone());
+
+    // New bucket-aware routes: /{bucket}/{blob_id}
+    let bucket_aware_routes = Router::new()
+        .route("/{bucket}/{blob_id}", get(read_blob_with_bucket))
+        .route("/{bucket}/{blob_id}", post(upload_data_with_bucket))
+        .route("/{bucket}/{blob_id}", put(upload_data_put_with_bucket))
+        .route("/{bucket}/{blob_id}", delete(delete_blob_with_bucket))
+        .layer(middleware::from_fn_with_state(
+            auth.clone(),
+            require_presign_auth,
+        ))
+        .layer(RequestBodyLimitLayer::new(config.max_data_rq_size))
+        .with_state(fs_controller.clone());
+
+    // Admin API presign route (uses Arc<AuthState>)
+    let admin_presign = Router::new()
+        .route("/admin/presign", post(presign_url))
+        .layer(middleware::from_fn_with_state(
+            auth.clone(),
+            require_api_key_auth,
+        ))
+        .layer(RequestBodyLimitLayer::new(config.max_presign_rq_size))
+        .layer(no_store.clone())
+        .with_state(auth.clone());
+
+    // Admin API routes - protected by API key (uses FsController)
+    let admin_api = Router::new()
+        .route("/admin/buckets", get(admin_list_buckets))
+        .route("/admin/buckets/{bucket}", get(admin_get_bucket))
+        .route("/admin/buckets/{bucket}", delete(admin_delete_bucket))
+        .route("/admin/objects", get(admin_list_objects))
+        .route("/admin/objects/{bucket}", get(admin_list_objects_in_bucket))
+        .route("/admin/stats", get(admin_storage_stats))
+        .layer(middleware::from_fn_with_state(
+            auth.clone(),
+            require_api_key_auth,
+        ))
+        .layer(RequestBodyLimitLayer::new(config.max_presign_rq_size))
         .with_state(fs_controller);
+
+    let metrics_api = Router::new().route("/healthz", get(health_check));
 
     // NOTE: Middleware is layered like an onion:
     //
@@ -221,9 +274,13 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
     //            v
     //         responses
     Router::new()
-        .merge(api_key_protected)
-        .merge(pre_sign_upload)
-        .merge(pre_sign_download)
+        .merge(metrics_api)
+        .merge(legacy_api_key_protected)
+        .merge(legacy_upload)
+        .merge(legacy_files)
+        .merge(admin_presign)
+        .merge(admin_api)
+        .merge(bucket_aware_routes)
         .fallback(reject_404) // NOTE: Without the fallback, we would always hit the authorization layer
         .layer(cors)
         .layer(tracing_layer)
@@ -248,8 +305,14 @@ struct AuthState {
     metadata_store: Arc<MetadataStore>,
 }
 
+/// Helper function for 404 rejections
 async fn reject_404() -> StatusCode {
     StatusCode::NOT_FOUND
+}
+
+/// Simple existence check for load-balancer
+async fn health_check() -> StatusCode {
+    StatusCode::OK
 }
 
 /// Middleware that checks if the request is authorized with the proper API-key
@@ -330,6 +393,8 @@ mod error {
         NotFound,
         #[error("Missing required parameter 'blob_id'")]
         MissingBlobId,
+        #[error("Invalid bucket name: {0}")]
+        BucketName(String),
         #[error("Header contained non-ascii value: {0}")]
         InvalidHeader(#[from] ToStrError),
         #[error("{0}")]
@@ -338,15 +403,23 @@ mod error {
         Headers(String),
         #[error("failed to build response: {0}")]
         ResponseFailed(#[from] axum::http::Error),
-        #[error(transparent)]
+        #[error("io-error: {0}")]
         Io(#[from] std::io::Error),
+        #[error("sqlite-error: {0}")]
+        Metadata(#[from] rusqlite::Error),
     }
 
     impl IntoResponse for Error {
         fn into_response(self) -> Response {
             let status = match &self {
-                Error::Io(_) | Error::ResponseFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                // IO, database and response builder are server errors
+                Error::Io(_) | Error::Metadata(_) | Error::ResponseFailed(_) => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
                 Error::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+                Error::Duplicate => StatusCode::CONFLICT,
+                Error::NotFound => StatusCode::NOT_FOUND,
+                // Everything else is a 400 bad-request
                 _ => StatusCode::BAD_REQUEST,
             };
             let message = self.to_string();
@@ -396,16 +469,40 @@ impl Success {
 
 type Result<T> = std::result::Result<T, Error>;
 
-async fn read_blob(
+/// Bucket-aware blob download handler
+async fn read_blob_with_bucket(
     State(storage): State<FsController>,
     Extension(PresignTtl(rem_ttl)): Extension<PresignTtl>,
-    Path(blob_id): Path<Uuid>,
+    Path((bucket, blob_id)): Path<(String, Uuid)>,
 ) -> Result<Response> {
-    let (blob_path, _) = storage.blob_path(&blob_id);
+    // Normalize and validate bucket name
+    let bucket = normalize_and_validate_bucket_name(&bucket).map_err(Error::BucketName)?;
 
-    let f = tokio::fs::File::open(blob_path)
-        .await
-        .map_err(|_| Error::NotFound)?;
+    // Get metadata first to find content hash
+    let metadata = storage
+        .get_metadata(&bucket, &blob_id)?
+        .ok_or(Error::NotFound)?;
+
+    // Try to open the file - check content-addressed storage first, then fall back to blob path
+    let f = if let Some(ref hash) = metadata.sha256_hash {
+        let content_path = storage.content_path_from_hex(hash);
+        match tokio::fs::File::open(&content_path).await {
+            Ok(file) => file,
+            Err(_) => {
+                // Fallback to blob path (unmigrated or migration in progress)
+                let blob_path = storage.blob_path(&bucket, &blob_id).0;
+                tokio::fs::File::open(&blob_path)
+                    .await
+                    .map_err(|_| Error::NotFound)?
+            }
+        }
+    } else {
+        // No hash in metadata, use blob path directly
+        let blob_path = storage.blob_path(&bucket, &blob_id).0;
+        tokio::fs::File::open(&blob_path)
+            .await
+            .map_err(|_| Error::NotFound)?
+    };
 
     // Stream file content into a response
     let stream = ReaderStream::new(f);
@@ -422,44 +519,80 @@ async fn read_blob(
     // Retrieve metadata and apply to response headers
     let mut response_builder = Response::builder().header(CACHE_CONTROL, cache_hdr);
 
-    // Try to get metadata and apply Content-Type and Content-Disposition
-    match storage.get_metadata(&blob_id) {
-        Ok(Some(metadata)) => {
-            // Apply Content-Type if available, otherwise use default
-            if let Some(content_type) = &metadata.content_type {
-                response_builder = response_builder.header(CONTENT_TYPE, content_type);
-            } else {
-                response_builder =
-                    response_builder.header(CONTENT_TYPE, "application/octet-stream");
-            }
-
-            // Apply Content-Disposition if available
-            if let Some(content_disposition) = &metadata.content_disposition {
-                response_builder =
-                    response_builder.header(CONTENT_DISPOSITION, content_disposition);
-            }
-
-            debug!(
-                blob_id = %blob_id,
-                content_type = metadata.content_type.as_deref().unwrap_or("none"),
-                content_disposition = metadata.content_disposition.as_deref().unwrap_or("none"),
-                "applied blob metadata to response"
-            );
-        }
-        Ok(None) => {
-            // No metadata found, use default Content-Type
-            response_builder = response_builder.header(CONTENT_TYPE, "application/octet-stream");
-            debug!(blob_id = %blob_id, "no metadata found, using default headers");
-        }
-        Err(e) => {
-            // Error retrieving metadata, use default and log warning
-            warn!(blob_id = %blob_id, "failed to retrieve metadata: {}", e);
-            response_builder = response_builder.header(CONTENT_TYPE, "application/octet-stream");
-        }
+    // Apply Content-Type if available, otherwise use default
+    if let Some(content_type) = &metadata.content_type {
+        response_builder = response_builder.header(CONTENT_TYPE, content_type);
+    } else {
+        response_builder = response_builder.header(CONTENT_TYPE, "application/octet-stream");
     }
+
+    // Apply Content-Disposition if available
+    if let Some(content_disposition) = &metadata.content_disposition {
+        response_builder = response_builder.header(CONTENT_DISPOSITION, content_disposition);
+    }
+
+    debug!(
+        blob_id = %blob_id,
+        bucket = %bucket,
+        content_type = metadata.content_type.as_deref().unwrap_or("none"),
+        content_disposition = metadata.content_disposition.as_deref().unwrap_or("none"),
+        "applied blob metadata to response"
+    );
 
     let response = response_builder.body(body)?;
     Ok(response)
+}
+
+/// Legacy blob download handler (uses "default" bucket)
+async fn legacy_read_blob(
+    State(storage): State<FsController>,
+    Extension(rem_ttl): Extension<PresignTtl>,
+    Path(blob_id): Path<Uuid>,
+) -> Result<Response> {
+    read_blob_with_bucket(
+        State(storage),
+        Extension(rem_ttl),
+        Path(("default".to_string(), blob_id)),
+    )
+    .await
+}
+
+/// Bucket-aware handler for deleting a blob
+async fn delete_blob_with_bucket(
+    State(storage): State<FsController>,
+    Path((bucket, blob_id)): Path<(String, Uuid)>,
+) -> Result<Json<Success>> {
+    // Normalize and validate bucket name
+    let bucket = normalize_and_validate_bucket_name(&bucket).map_err(Error::BucketName)?;
+
+    // Delete the blob from both filesystem and metadata
+    let existed = storage.delete_blob(&bucket, &blob_id).map_err(|e| {
+        warn!("Failed to delete blob {}/{}: {}", bucket, blob_id, e);
+        Error::Headers(format!("Failed to delete blob: {e}"))
+    })?;
+
+    if !existed {
+        return Err(Error::NotFound);
+    }
+
+    info!(%blob_id, bucket = %bucket, "deleted blob");
+
+    Ok(Json(Success {
+        success: true,
+        message: format!("deleted blob {blob_id}"),
+        blob_id: Some(blob_id),
+        bytes_written: None,
+        sha256_hash: None,
+        missing_chunks: None,
+    }))
+}
+
+/// Legacy handler for deleting a blob (uses "default" bucket)
+async fn legacy_delete_blob(
+    State(storage): State<FsController>,
+    Path(blob_id): Path<Uuid>,
+) -> Result<Json<Success>> {
+    delete_blob_with_bucket(State(storage), Path(("default".to_string(), blob_id))).await
 }
 
 enum UploadType {
@@ -531,7 +664,11 @@ impl UploadType {
 }
 
 /// Extract metadata from request headers
-fn extract_metadata_from_headers(headers: &HeaderMap, blob_id: Uuid) -> Result<BlobMetadata> {
+fn extract_metadata_from_headers(
+    headers: &HeaderMap,
+    bucket: String,
+    blob_id: Uuid,
+) -> Result<BlobMetadata> {
     let content_type = headers
         .get(CONTENT_TYPE)
         .map(|h| h.to_str())
@@ -544,27 +681,30 @@ fn extract_metadata_from_headers(headers: &HeaderMap, blob_id: Uuid) -> Result<B
         .transpose()?
         .map(|s| s.to_string());
 
-    Ok(BlobMetadata::new(blob_id)
+    Ok(BlobMetadata::new(bucket, blob_id)
         .with_content_type(content_type)
         .with_content_disposition(content_disposition))
 }
 
-/// General entrypoint for the upload logic
-async fn upload_data(
+/// General entrypoint for the upload logic (bucket-aware)
+async fn upload_data_with_bucket(
     State(storage): State<FsController>,
-    Path(blob_id): Path<Uuid>,
+    Path((bucket, blob_id)): Path<(String, Uuid)>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<Success>> {
+    // Normalize and validate bucket name
+    let bucket = normalize_and_validate_bucket_name(&bucket).map_err(Error::BucketName)?;
+
     // 1. Extract metadata from headers
-    let metadata = extract_metadata_from_headers(&headers, blob_id)?;
+    let metadata = extract_metadata_from_headers(&headers, bucket.clone(), blob_id)?;
 
     // 2. Determine file upload type from headers
     let upload_type = UploadType::from_headers(&headers)?;
 
     match upload_type {
         UploadType::Full => {
-            let r = upload_full(storage, blob_id, metadata, body).await;
+            let r = upload_full(storage, bucket, blob_id, metadata, body, false).await;
             if let Err(e) = &r {
                 warn!(%blob_id, "{e}");
             }
@@ -575,14 +715,23 @@ async fn upload_data(
             chunk_total,
         } => {
             // For chunked uploads, we'll store metadata when all chunks are merged
-            let r = upload_chunk(storage, blob_id, chunk_idx, chunk_total, body).await;
+            let r = upload_chunk(
+                storage,
+                bucket,
+                blob_id,
+                chunk_idx,
+                chunk_total,
+                body,
+                false,
+            )
+            .await;
             if let Err(e) = &r {
                 warn!(%blob_id, chunk_idx, chunk_total, "{e}");
             }
             r
         }
         UploadType::Merge { chunk_total } => {
-            let r = merge_chunks(storage, blob_id, chunk_total, metadata).await;
+            let r = merge_chunks(storage, bucket, blob_id, chunk_total, metadata).await;
             if let Err(e) = &r {
                 warn!(%blob_id, chunk_total, "{e}");
             }
@@ -591,20 +740,104 @@ async fn upload_data(
     }
 }
 
+/// Legacy entrypoint for upload logic (uses "default" bucket)
+async fn legacy_upload_data(
+    State(storage): State<FsController>,
+    Path(blob_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Success>> {
+    upload_data_with_bucket(
+        State(storage),
+        Path(("default".to_string(), blob_id)),
+        headers,
+        body,
+    )
+    .await
+}
+
+/// General entrypoint for the upload logic (PUT method - allows overwrite, bucket-aware)
+async fn upload_data_put_with_bucket(
+    State(storage): State<FsController>,
+    Path((bucket, blob_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Success>> {
+    // Normalize and validate bucket name
+    let bucket = normalize_and_validate_bucket_name(&bucket).map_err(Error::BucketName)?;
+
+    let metadata = extract_metadata_from_headers(&headers, bucket.clone(), blob_id)?;
+    let upload_type = UploadType::from_headers(&headers)?;
+
+    match upload_type {
+        UploadType::Full => {
+            let r = upload_full(storage, bucket, blob_id, metadata, body, true).await;
+            if let Err(e) = &r {
+                warn!(%blob_id, "{e}");
+            }
+            r
+        }
+        UploadType::Chunked {
+            chunk_idx,
+            chunk_total,
+        } => {
+            let r =
+                upload_chunk(storage, bucket, blob_id, chunk_idx, chunk_total, body, true).await;
+            if let Err(e) = &r {
+                warn!(%blob_id, chunk_idx, chunk_total, "{e}");
+            }
+            r
+        }
+        UploadType::Merge { chunk_total } => {
+            let r = merge_chunks(storage, bucket, blob_id, chunk_total, metadata).await;
+            if let Err(e) = &r {
+                warn!(%blob_id, chunk_total, "{e}");
+            }
+            r
+        }
+    }
+}
+
+/// Legacy entrypoint for upload logic (PUT method - uses "default" bucket)
+async fn legacy_upload_data_put(
+    State(storage): State<FsController>,
+    Path(blob_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Success>> {
+    upload_data_put_with_bucket(
+        State(storage),
+        Path(("default".to_string(), blob_id)),
+        headers,
+        body,
+    )
+    .await
+}
+
 async fn upload_chunk(
     storage: FsController,
+    bucket: String,
     blob_id: Uuid,
     chunk_idx: usize,
     chunk_total: usize,
     body: Body,
+    allow_overwrite: bool,
 ) -> Result<Json<Success>> {
     let (chunk_path, chunk_tmp) = storage.chunk_path(&blob_id, chunk_idx, chunk_total)?;
-    // Check, if there is a blob with that ID
-    let (blob_path, _) = storage.blob_path(&blob_id);
-    if blob_path.exists() {
-        return Err(Error::Duplicate);
+
+    // TODO: I think this logic is now wrong !
+    // Check if there is already a final blob with that ID (only if overwrite not allowed)
+    if !allow_overwrite {
+        let (blob_path, _) = storage.blob_path(&bucket, &blob_id);
+        if blob_path.exists() {
+            return Err(Error::Duplicate);
+        }
     }
-    let (bytes_written, _sha256) = stream_body_to_file(body, chunk_path, chunk_tmp).await?;
+
+    let (bytes_written, _sha256) = stream_body_to_file(body, chunk_tmp.clone()).await?;
+
+    // Rename tmp to final chunk path
+    std::fs::rename(&chunk_tmp, &chunk_path)?;
     let bytes = byte_size_str(bytes_written);
     debug!(%blob_id, %bytes, "uploaded chunk {chunk_idx}/{chunk_total}");
 
@@ -622,6 +855,7 @@ async fn upload_chunk(
 
 async fn merge_chunks(
     storage: FsController,
+    bucket: String,
     blob_id: Uuid,
     chunk_total: usize,
     mut metadata: BlobMetadata,
@@ -638,22 +872,54 @@ async fn merge_chunks(
         }));
     }
 
-    let (bytes_written, sha256) = storage.merge_chunks(&blob_id, chunk_total)?;
+    // Ensure bucket directory exists before merging
+    storage.ensure_bucket_dir(&bucket)?;
 
-    // Update metadata with file size, hash, and store it
+    // Step 1: Merge chunks to temporary file and calculate hash
+    let (tmp_path, bytes_written, sha256) = storage.merge_chunks(&bucket, &blob_id, chunk_total)?;
     let sha256_hex = hex::encode(sha256);
+
+    // Step 2: Move content to content-addressable storage (with dedup)
+    let content_path = storage.content_path(&sha256);
+    let dedup_occurred = if !content_path.exists() {
+        // We're first! Move our merged file to content storage
+        std::fs::rename(&tmp_path, &content_path)?;
+        debug!(%blob_id, hash=%sha256_hex, "stored new content from merged chunks");
+        false
+    } else {
+        // Content already exists (dedup!), discard our copy
+        std::fs::remove_file(&tmp_path)?;
+        debug!(%blob_id, hash=%sha256_hex, "deduplicated merged chunks");
+        true
+    };
+
+    // Step 3: Store metadata and update refcount
     metadata = metadata
-        .with_file_size(Some(bytes_written as i64))
-        .with_sha256_hash(Some(sha256_hex.clone()));
-    if let Err(e) = storage.store_metadata(&metadata) {
-        warn!(%blob_id, "Failed to store metadata: {}", e);
-    }
+        .with_file_size(bytes_written as i64)
+        .with_sha256_hash(sha256_hex.clone());
+
+    // Store metadata
+    storage.store_metadata(&metadata)?;
+
+    // Update content reference count
+    storage
+        .get_metadata_store()
+        .increment_content_ref(&sha256_hex, bytes_written as i64)?;
+
+    // Step 4: Optionally create symlink for human visibility
+    storage.handle_symlinks(&bucket, &blob_id, &sha256);
 
     let bytes = byte_size_str(bytes_written);
-    debug!(%blob_id, %bytes, "merged chunks");
+    let dedup_msg = if dedup_occurred {
+        " (deduplicated)"
+    } else {
+        ""
+    };
+    debug!(%blob_id, %bytes, hash=%sha256_hex, "merged chunks{}", dedup_msg);
+
     let success = Success {
         success: true,
-        message: format!("merged {} chunks", chunk_total),
+        message: format!("merged {} chunks{}", chunk_total, dedup_msg),
         blob_id: Some(blob_id),
         bytes_written: Some(bytes_written),
         sha256_hash: Some(sha256_hex),
@@ -665,30 +931,68 @@ async fn merge_chunks(
 /// Helper function to perform the oneshot (full) upload
 async fn upload_full(
     storage: FsController,
+    bucket: String,
     blob_id: Uuid,
     mut metadata: BlobMetadata,
     body: Body,
+    allow_overwrite: bool,
 ) -> Result<Json<Success>> {
-    let (blob_path, blob_tmp) = storage.blob_path(&blob_id);
-    if blob_path.exists() {
+    // Ensure bucket directory exists
+    storage.ensure_bucket_dir(&bucket)?;
+
+    let (_blob_path, blob_tmp) = storage.blob_path(&bucket, &blob_id);
+
+    // Check for duplicate blob_id if overwrite not allowed (POST semantics)
+    // Note: we check metadata, not filesystem, since we use content-addressable storage
+    if !allow_overwrite && storage.get_metadata(&bucket, &blob_id)?.is_some() {
         return Err(Error::Duplicate);
     }
-    let (bytes_written, sha256) = stream_body_to_file(body, blob_path, blob_tmp).await?;
 
-    // Update metadata with file size and hash, then store it
+    // Step 1: Stream to temporary file and calculate hash
+    let (bytes_written, sha256) = stream_body_to_file(body, blob_tmp.clone()).await?;
     let sha256_hex = hex::encode(sha256);
+
+    // Step 2: Move content to content-addressable storage (with dedup)
+    let content_path = storage.content_path(&sha256);
+    let dedup_occurred = if !content_path.exists() {
+        // We're first! Move our upload to content storage
+        std::fs::rename(&blob_tmp, &content_path)?;
+        debug!(%blob_id, hash=%sha256_hex, "stored new content");
+        false
+    } else {
+        // Content already exists (dedup!), discard our copy
+        std::fs::remove_file(&blob_tmp)?;
+        debug!(%blob_id, hash=%sha256_hex, "deduplicated content");
+        true
+    };
+
+    // Step 3: Store metadata and update refcount
     metadata = metadata
-        .with_file_size(Some(bytes_written as i64))
-        .with_sha256_hash(Some(sha256_hex.clone()));
-    if let Err(e) = storage.store_metadata(&metadata) {
-        warn!(%blob_id, "Failed to store metadata: {}", e);
-    }
+        .with_file_size(bytes_written as i64)
+        .with_sha256_hash(sha256_hex.clone());
+
+    // Store metadata
+    storage.store_metadata(&metadata)?;
+
+    // Update content reference count
+    storage
+        .get_metadata_store()
+        .increment_content_ref(&sha256_hex, bytes_written as i64)?;
+
+    // Step 4: Optionally create symlink for human visibility
+    storage.handle_symlinks(&bucket, &blob_id, &sha256);
 
     let bytes = byte_size_str(bytes_written);
-    debug!(%blob_id, %bytes, "uploaded blob");
+    let dedup_msg = if dedup_occurred {
+        " (deduplicated)"
+    } else {
+        ""
+    };
+    debug!(%blob_id, %bytes, hash=%sha256_hex, "uploaded blob{}", dedup_msg);
+
     let success = Success {
         success: true,
-        message: "uploaded blob".to_string(),
+        message: format!("uploaded blob{}", dedup_msg),
         blob_id: Some(blob_id),
         bytes_written: Some(bytes_written),
         sha256_hash: Some(sha256_hex),
@@ -697,18 +1001,14 @@ async fn upload_full(
     Ok(Json(success))
 }
 
-/// Helper function that streams the content of a http-body into a file
+/// Helper function that streams the content of a http-body into a temporary file
 ///
-/// First a temporary file is created at `tmp_path`, which the bytes will be streamed to.
-/// After the stream has finished, the `tmp_path` is renamed into `target_path`.
+/// Streams bytes to `tmp_path` and calculates SHA-256 hash during streaming.
+/// Returns the number of bytes written and the hash.
 ///
-/// This way we will not end up with broken files due to interrupted connections.
-/// All files with the `.tmp` suffix can later be spotted and removed.
-async fn stream_body_to_file(
-    body: Body,
-    target_path: PathBuf,
-    tmp_path: PathBuf,
-) -> Result<(usize, [u8; 32])> {
+/// NOTE: This function does NOT rename the tmp file - caller must handle final placement
+/// (either rename to content-addressed storage or to blob storage).
+async fn stream_body_to_file(body: Body, tmp_path: PathBuf) -> Result<(usize, [u8; 32])> {
     let f = File::create(&tmp_path)?;
     let mut writer = BufWriter::new(f);
     let mut bytes_written = 0;
@@ -727,7 +1027,6 @@ async fn stream_body_to_file(
         }
     }
     writer.flush()?;
-    std::fs::rename(&tmp_path, &target_path)?;
     let sha256 = hash.finalize();
     Ok((bytes_written, sha256.into()))
 }
@@ -736,7 +1035,9 @@ async fn stream_body_to_file(
 #[serde(rename_all = "lowercase")]
 pub enum PresignAction {
     Upload,
+    Update,
     Download,
+    Delete,
 }
 
 #[derive(Serialize)]
@@ -759,6 +1060,10 @@ pub struct PresignRequest {
     #[serde(default)]
     pub blob_id: Option<Uuid>,
 
+    /// Optional: bucket name, defaults to "default"
+    #[serde(default)]
+    pub bucket: Option<String>,
+
     /// Optional: duration in seconds, server clamps to max allowed
     #[serde(default)]
     pub expires_in: Option<u64>,
@@ -774,22 +1079,48 @@ async fn presign_url(
         .unwrap_or(MAX_EXPIRY_SECS)
         .min(MAX_EXPIRY_SECS);
 
+    // Get bucket from request or default to "default", then validate and normalize
+    let bucket_input = presign.bucket.as_deref().unwrap_or("default");
+    let bucket = normalize_and_validate_bucket_name(bucket_input).map_err(Error::BucketName)?;
+
     // Check upload action
     let (method, path, blob_id, sha256_hash) = match presign.action {
         PresignAction::Upload => {
             let blob_id = presign.blob_id.unwrap_or_else(Uuid::now_v7);
-            ("POST", format!("/upload/{blob_id}"), blob_id, None)
+            // Use new bucket-aware path
+            ("POST", format!("/{bucket}/{blob_id}"), blob_id, None)
+        }
+        PresignAction::Update => {
+            let blob_id = match presign.blob_id {
+                Some(id) => id,
+                None => return Err(Error::MissingBlobId),
+            };
+            // Use new bucket-aware path
+            ("PUT", format!("/{bucket}/{blob_id}"), blob_id, None)
         }
         PresignAction::Download => {
             let blob_id = match presign.blob_id {
                 Some(id) => id,
                 None => return Err(Error::MissingBlobId),
             };
-            let sha256_hash = auth.metadata_store.get_sha256(&blob_id).ok().flatten();
-            ("GET", format!("/files/{blob_id}"), blob_id, sha256_hash)
+            let sha256_hash = auth
+                .metadata_store
+                .get_sha256(&bucket, &blob_id)
+                .ok()
+                .flatten();
+            // Use new bucket-aware path
+            ("GET", format!("/{bucket}/{blob_id}"), blob_id, sha256_hash)
+        }
+        PresignAction::Delete => {
+            let blob_id = match presign.blob_id {
+                Some(id) => id,
+                None => return Err(Error::MissingBlobId),
+            };
+            // Use new bucket-aware path
+            ("DELETE", format!("/{bucket}/{blob_id}"), blob_id, None)
         }
     };
-    debug!(%expires_in, %method, %path, %blob_id, "presigning url");
+    debug!(%expires_in, %method, %path, %blob_id, bucket, "presigning url");
 
     let signed_url =
         generate_presigned_url(method, &auth.domain, &path, &auth.hmac_secret, expires_in);
@@ -804,6 +1135,263 @@ async fn presign_url(
         expires_in,
     };
     Ok(Json(res))
+}
+
+// ============================================================================
+// Admin API - Bucket and Object Management
+// ============================================================================
+
+#[derive(Serialize)]
+struct BucketResponse {
+    name: String,
+    created_at: String,
+    object_count: i64,
+    total_size: i64,
+    total_size_human: String,
+}
+
+impl From<crate::metadata::Bucket> for BucketResponse {
+    fn from(bucket: crate::metadata::Bucket) -> Self {
+        BucketResponse {
+            name: bucket.name,
+            created_at: bucket.created_at.to_rfc3339(),
+            object_count: bucket.object_count,
+            total_size: bucket.total_size,
+            total_size_human: byte_size_str(bucket.total_size as usize),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ListBucketsResponse {
+    success: bool,
+    buckets: Vec<BucketResponse>,
+}
+
+#[derive(Serialize)]
+struct GetBucketResponse {
+    success: bool,
+    bucket: BucketResponse,
+}
+
+#[derive(Serialize)]
+struct ObjectResponse {
+    bucket: String,
+    blob_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_disposition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_size_human: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha256_hash: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<BlobMetadata> for ObjectResponse {
+    fn from(meta: BlobMetadata) -> Self {
+        ObjectResponse {
+            bucket: meta.bucket,
+            blob_id: meta.blob_id,
+            content_type: meta.content_type,
+            content_disposition: meta.content_disposition,
+            file_size: meta.file_size,
+            file_size_human: meta.file_size.map(|s| byte_size_str(s as usize)),
+            sha256_hash: meta.sha256_hash,
+            created_at: meta.created_at.to_rfc3339(),
+            updated_at: meta.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ListObjectsResponse {
+    success: bool,
+    objects: Vec<ObjectResponse>,
+    total: usize,
+    limit: u32,
+    offset: u32,
+}
+
+#[derive(Serialize)]
+struct StorageStatsResponse {
+    success: bool,
+    stats: crate::metadata::StorageStats,
+}
+
+#[derive(Deserialize)]
+struct PaginationQuery {
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    offset: Option<u32>,
+}
+
+/// Default pagination limit
+const DEFAULT_LIMIT: u32 = 100;
+
+/// Maximum pagination limit
+const MAX_LIMIT: u32 = 1000;
+
+/// GET /admin/buckets - List all buckets
+async fn admin_list_buckets(
+    State(storage): State<FsController>,
+) -> Result<Json<ListBucketsResponse>> {
+    let buckets = storage
+        .get_metadata_store()
+        .list_buckets()
+        .map_err(|e| Error::Headers(format!("Failed to list buckets: {e}")))?;
+
+    let bucket_responses: Vec<BucketResponse> = buckets.into_iter().map(Into::into).collect();
+
+    Ok(Json(ListBucketsResponse {
+        success: true,
+        buckets: bucket_responses,
+    }))
+}
+
+/// GET /admin/buckets/:bucket - Get bucket info
+async fn admin_get_bucket(
+    State(storage): State<FsController>,
+    Path(bucket): Path<String>,
+) -> Result<Json<GetBucketResponse>> {
+    // Normalize and validate bucket name
+    let bucket = normalize_and_validate_bucket_name(&bucket).map_err(Error::BucketName)?;
+
+    let bucket_info = storage
+        .get_metadata_store()
+        .get_bucket(&bucket)
+        .map_err(|e| Error::Headers(format!("Failed to get bucket: {e}")))?
+        .ok_or(Error::NotFound)?;
+
+    Ok(Json(GetBucketResponse {
+        success: true,
+        bucket: bucket_info.into(),
+    }))
+}
+
+/// DELETE /admin/buckets/:bucket - Delete bucket (only if empty)
+async fn admin_delete_bucket(
+    State(storage): State<FsController>,
+    Path(bucket): Path<String>,
+) -> Result<Json<Success>> {
+    // Normalize and validate bucket name
+    let bucket = normalize_and_validate_bucket_name(&bucket).map_err(Error::BucketName)?;
+
+    // Check if bucket is empty
+    let bucket_info = storage
+        .get_metadata_store()
+        .get_bucket(&bucket)
+        .map_err(|e| Error::Headers(format!("Failed to get bucket: {e}")))?
+        .ok_or(Error::NotFound)?;
+
+    if bucket_info.object_count > 0 {
+        return Err(Error::Headers(format!(
+            "Bucket '{}' is not empty ({} objects)",
+            bucket, bucket_info.object_count
+        )));
+    }
+
+    // Delete the bucket
+    let deleted = storage
+        .get_metadata_store()
+        .delete_bucket(&bucket)
+        .map_err(|e| Error::Headers(format!("Failed to delete bucket: {e}")))?;
+
+    if !deleted {
+        return Err(Error::NotFound);
+    }
+
+    // Also delete the bucket directory from filesystem
+    let bucket_dir = storage.bucket_dir(&bucket);
+    if bucket_dir.exists() {
+        std::fs::remove_dir_all(&bucket_dir)
+            .map_err(|e| Error::Headers(format!("Failed to delete bucket directory: {e}")))?;
+    }
+
+    info!(%bucket, "deleted bucket");
+
+    Ok(Json(Success {
+        success: true,
+        message: format!("deleted bucket '{}'", bucket),
+        blob_id: None,
+        bytes_written: None,
+        sha256_hash: None,
+        missing_chunks: None,
+    }))
+}
+
+/// GET /admin/objects - List all objects (paginated)
+async fn admin_list_objects(
+    State(storage): State<FsController>,
+    Query(params): Query<PaginationQuery>,
+) -> Result<Json<ListObjectsResponse>> {
+    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
+    let offset = params.offset.unwrap_or(0);
+
+    let objects = storage
+        .get_metadata_store()
+        .list_all_objects(Some(limit), Some(offset))
+        .map_err(|e| Error::Headers(format!("Failed to list objects: {e}")))?;
+
+    let total = objects.len();
+    let object_responses: Vec<ObjectResponse> = objects.into_iter().map(Into::into).collect();
+
+    Ok(Json(ListObjectsResponse {
+        success: true,
+        objects: object_responses,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+/// GET /admin/objects/:bucket - List objects in bucket (paginated)
+async fn admin_list_objects_in_bucket(
+    State(storage): State<FsController>,
+    Path(bucket): Path<String>,
+    Query(params): Query<PaginationQuery>,
+) -> Result<Json<ListObjectsResponse>> {
+    // Normalize and validate bucket name
+    let bucket = normalize_and_validate_bucket_name(&bucket).map_err(Error::BucketName)?;
+
+    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
+    let offset = params.offset.unwrap_or(0);
+
+    let objects = storage
+        .get_metadata_store()
+        .list_objects_in_bucket(&bucket, Some(limit), Some(offset))
+        .map_err(|e| Error::Headers(format!("Failed to list objects: {e}")))?;
+
+    let total = objects.len();
+    let object_responses: Vec<ObjectResponse> = objects.into_iter().map(Into::into).collect();
+
+    Ok(Json(ListObjectsResponse {
+        success: true,
+        objects: object_responses,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+/// GET /admin/stats - Get comprehensive storage statistics
+async fn admin_storage_stats(
+    State(storage): State<FsController>,
+) -> Result<Json<StorageStatsResponse>> {
+    let stats = storage
+        .get_metadata_store()
+        .get_storage_stats()
+        .map_err(|e| Error::Headers(format!("Failed to get storage stats: {e}")))?;
+
+    Ok(Json(StorageStatsResponse {
+        success: true,
+        stats,
+    }))
 }
 
 #[cfg(test)]
@@ -830,7 +1418,7 @@ mod tests {
     ) -> (axum::Router, TempDir) {
         let dir = tempdir().unwrap();
         let metadata_db = dir.path().join("metadata.db");
-        let fs = FsController::init(dir.path(), &metadata_db).unwrap();
+        let fs = FsController::init(dir.path(), &metadata_db, false).unwrap();
         let service = build_service(
             Config {
                 ip_addr: "127.0.0.1:3000".to_string(),
@@ -844,6 +1432,7 @@ mod tests {
                 max_presign_rq_size: max_presign,
                 rq_timeout_secs,
                 metadata_db_path: None,
+                create_bucket_symlinks: false,
             },
             fs,
         );
@@ -1116,7 +1705,7 @@ mod tests {
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // 3) Duplicate upload -> 400 Duplicate
+        // 3) Duplicate upload -> 409 Conflict (POST semantics - no overwrite)
         let req = HttpRequest::builder()
             .method("POST")
             .uri(format!("{path}?{query}"))
@@ -1124,7 +1713,7 @@ mod tests {
             .body(Body::from("abc"))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
         let v = json_body(resp).await;
         assert_eq!(v["success"], false);
         assert!(

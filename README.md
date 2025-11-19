@@ -9,12 +9,16 @@ persists data on the local filesystem, and includes an automatic janitor for cle
 
 ## ✨ Features
 
+* **Blazingly fast** - high-performance web-stack with advanced multi-threading allows fast concurrent up- and downloads
+* **Ressource efficient** - uploads are directly streamed to disk in an asynchronous manner, while only keeping a small buffer in RAM
+* **Bucket support** organize files into isolated namespaces with automatic validation and normalization
 * **Pre-signed URL flow** using HMAC-SHA256 (signature and expiry check, constant-time compare)
-* **Clean API** all errors and responses are uniformly json, data upload and download uses http-streams for performance
+* **Content-addressable storage with deduplication** automatic storage optimization - identical files are stored only once, massively saving storage in the process
+* **Clean JSON-API** all errors and responses are uniformly json, data upload and download uses http-streams for performance
+* **Admin API** comprehensive management endpoints for statistics, buckets, and objects
 * **Chunked uploads** with server-side merge and crash‑safe temp files
-* **Automatic cleanup** of orphaned `.tmp` files and stale chunk directories
-* **Configurable limits** (request size caps, request timeout, TTL for orphans)
-* **Graceful shutdown** on `SIGINT`/`SIGTERM`
+* **Highly configurable** - request size caps, request timeout, TTL for orphaned files, ... you can tune everything to exactly fit your use case
+* **Graceful shutdown** - no data is lost or left in an inconsistent when killing this service
 * **Structured logging** with latency measurement and request-ids
 
 ---
@@ -30,7 +34,7 @@ Assuming you have your server locally available, it would look something like th
 curl 127.0.0.1:3000/presign \
     -H "authorization: Bearer secret-api-key" \
     -H "content-type: application/json" \
-    -d '{ "action": "upload" }'
+    -d '{ "action": "upload", "bucket": "default" }'
 ```
 
 This will produce a response like this:
@@ -39,18 +43,19 @@ This will produce a response like this:
 {
   "success": true,
   "action": "upload",
+  "bucket": "default",
   "blob_id": "01996168-e738-7552-9662-2041482b96c3",
-  "url": "http://localhost:3000/upload/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=",
+  "url": "http://localhost:3000/default/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=",
   "method": "POST",
   "expires_in": 900
 }
 ```
 
-You can now use the pre-signed url to upload your data (which will be stored under the given `blob_id`):
+You can now use the pre-signed url to upload your data (which will be stored under the given `blob_id` in the specified bucket):
 
 
 ```bash
-curl -X POST "http://localhost:3000/upload/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
+curl -X POST "http://localhost:3000/default/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
     -H "Content-Type: application/pdf" \
     -H "Content-Disposition: attachment; filename=\"My_Fancy_File.pdf\"" \
     --data-binary @My_Fancy_File.pdf
@@ -77,10 +82,10 @@ To retrive the data, you have to presign a download url, and then you can downlo
 curl 127.0.0.1:3000/presign \
     -H "authorization: Bearer secret-api-key" \
     -H "content-type: application/json" \
-    -d '{ "action": "download", "blob_id": "01996168-e738-7552-9662-2041482b96c3" }'
-    
+    -d '{ "action": "download", "bucket": "default", "blob_id": "01996168-e738-7552-9662-2041482b96c3" }'
+
 # The response looks identical to the upload response - the most important path is the presigned url, which you need to download:
-curl "http://localhost:3000/files/01996168-e738-7552-9662-2041482b96c3?expires=1758277521&sig=QjRyPQUAQ9QwtKGiKg_4oUwK3QiuL3_X13UXiKs86W8=" -o My_Fancy_File.pdf
+curl "http://localhost:3000/default/01996168-e738-7552-9662-2041482b96c3?expires=1758277521&sig=QjRyPQUAQ9QwtKGiKg_4oUwK3QiuL3_X13UXiKs86W8=" -o My_Fancy_File.pdf
 ```
 
 ### Chunked upload
@@ -91,19 +96,19 @@ This effectively allows you to upload your file piece by piece, while the server
 This is done via the same upload endpoint, but using special request headers to indicate the upload type and chunk-index:
 
 ``` shell
-curl -X POST "http://localhost:3000/upload/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
-    -H "x-upload-type: chunked" \ 
-    -H "x-chunk-index: 1" \ 
-    -H "x-chunk-total: 3" \ 
+curl -X POST "http://localhost:3000/default/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
+    -H "x-upload-type: chunked" \
+    -H "x-chunk-index: 1" \
+    -H "x-chunk-total: 3" \
     --data-binary @File-Chunk_1_3
 ```
 
 After all chunks are uploaded, a last request advises the server to perform the merge:
 
 ``` shell
-curl -X POST "http://localhost:3000/upload/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
-    -H "x-upload-type: chunked" \ 
-    -H "x-chunk-merge: true" \ 
+curl -X POST "http://localhost:3000/default/01996168-e738-7552-9662-2041482b96c3?expires=1758276788&sig=BDtmjKQ2iImF5emvbyqPdivEojq60UI6gYuKDRQBSO4=" \
+    -H "x-upload-type: chunked" \
+    -H "x-chunk-merge: true" \
     -H "x-chunk-total: 3"
 ```
 
@@ -111,7 +116,7 @@ You can then download the file like normal.
 
 ### 📄 Metadata Support
 
-The storage server now supports proper browser downloads by preserving file metadata:
+The storage server supports proper browser downloads by preserving file metadata:
 
 - **Content-Type**: Set the `Content-Type` header during upload to ensure proper MIME type handling
 - **Content-Disposition**: Set the `Content-Disposition` header to control filename and download behavior
@@ -132,6 +137,111 @@ curl -X POST "<presigned-upload-url>" \
 ```
 
 For chunked uploads, metadata headers should be included in the final merge request.
+
+### 🗂️ Buckets - Multi-Tenant Storage
+
+Buckets provide isolated namespaces for organizing your files, similar to S3 buckets. Each bucket acts as a separate container, allowing you to:
+
+- **Organize files by purpose** - separate production data from development, or organize by customer/project
+- **Isolate storage** - files in different buckets are completely isolated from each other
+- **Simplify management** - use the admin API to view statistics and manage buckets independently
+
+The main difference to standard s3 storage is, that buckets are created automatically, when you upload a file to them.
+
+**Bucket naming rules:**
+- Only lowercase letters (a-z), numbers (0-9), hyphens (-), and underscores (_) are allowed
+- Names are automatically normalized to lowercase letters
+- Must be at least 1 character long
+
+**Default bucket:**
+If you don't specify a bucket in your presign request, the server automatically uses the `"default"` bucket. Both of these requests are equivalent:
+
+```bash
+# Explicit bucket
+'{ "action": "upload", "bucket": "default" }'
+
+# Implicit default bucket (legacy compatibility)
+'{ "action": "upload" }'
+```
+
+**Examples:**
+
+```bash
+# Upload to custom bucket
+curl 127.0.0.1:3000/presign \
+    -H "authorization: Bearer secret-api-key" \
+    -H "content-type: application/json" \
+    -d '{ "action": "upload", "bucket": "user-uploads" }'
+
+# Upload to production bucket
+curl 127.0.0.1:3000/presign \
+    -H "authorization: Bearer secret-api-key" \
+    -H "content-type: application/json" \
+    -d '{ "action": "upload", "bucket": "production-data" }'
+```
+
+### 💾 Content-Addressable Storage & Deduplication
+
+The storage server uses content-addressable storage with automatic deduplication to optimize storage efficiency:
+
+**How it works:**
+- Each file is hashed using SHA-256 during upload
+- Files with identical content are stored only once on disk
+- Multiple blob IDs can reference the same physical file
+
+**Benefits:**
+- **Massive storage savings** - reduction when storing duplicate files
+- **Automatic optimization** - no client-side coordination needed
+- **Preserved semantics** - each blob ID still behaves independently
+- **Efficient at scale** - deduplication improves as more files are uploaded
+
+**Monitoring deduplication:**
+Use the admin stats endpoint to see deduplication effectiveness:
+```bash
+curl 127.0.0.1:3000/admin/stats \
+    -H "authorization: Bearer secret-api-key"
+```
+
+The response includes:
+- `total_objects` - number of blob IDs in the system
+- `unique_content_files` - actual unique files on disk
+- `actual_storage_bytes` - physical disk usage
+- `logical_storage_bytes` - total size if all files were stored separately
+- `deduplication_percentage` - storage savings from deduplication
+
+### 🔧 Admin API
+
+The admin API provides comprehensive endpoints for monitoring and managing your storage server. All admin endpoints require API key authentication.
+
+**Statistics:**
+```bash
+# Get overall storage statistics
+GET /admin/stats
+```
+Returns total objects, unique content files, storage usage, and deduplication metrics.
+
+**Bucket Management:**
+```bash
+# List all buckets with object counts and sizes
+GET /admin/buckets
+
+# Get detailed information about a specific bucket
+GET /admin/buckets/{bucket}
+
+# Delete an empty bucket
+DELETE /admin/buckets/{bucket}
+```
+
+**Object Listing:**
+```bash
+# List all objects across all buckets (paginated)
+GET /admin/objects?limit=100&offset=0
+
+# List objects in a specific bucket (paginated)
+GET /admin/objects/{bucket}?limit=100&offset=0
+```
+
+All admin endpoints return JSON responses with detailed information about your storage system.
 
 ## 🏗 Build & Deploy
 
@@ -224,8 +334,9 @@ You can configure borderless-storage via **(1) config file**, **(2) CLI flags**,
 | `ttl_orphan_secs`     | `TTL_ORPHAN_SECS`     | `43200` (12h)            | Orphan TTL for temp files/chunks   |
 | `max_data_rq_size`    | `MAX_DATA_RQ_SIZE`    | `256 * 1024^2` (256 MiB) | Hard cap for data API requests     |
 | `max_presign_rq_size` | `MAX_PRESIGN_RQ_SIZE` | `10 * 1024` (10 KiB)     | Hard cap for pre‑sign endpoints    |
-| `rq_timeout_secs`     | `RQ_TIMEOUT_SECS`     | `30` seconds             | Per‑request timeout                |
-| `metadata_db_path`    | `METADATA_DB_PATH`    | `<data_dir>/metadata.db` | SQLite database for blob metadata  |
+| `rq_timeout_secs`        | `RQ_TIMEOUT_SECS`        | `30` seconds             | Per‑request timeout                      |
+| `metadata_db_path`       | `METADATA_DB_PATH`       | `<data_dir>/metadata.db` | SQLite database for blob metadata        |
+| `create_bucket_symlinks` | `CREATE_BUCKET_SYMLINKS` | `true`                   | Enable/disable symlink creation for deduplication |
 
 > The server validates the data directory is writable by creating and removing a small probe file.
 

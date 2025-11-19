@@ -64,6 +64,22 @@ pub struct Config {
     /// Path to the metadata database
     /// Defaults to `<DATA_DIR>/metadata.db`
     pub metadata_db_path: Option<PathBuf>,
+
+    /// Create symlinks in buckets/ pointing to content/ for human visibility
+    /// Defaults to true on Unix systems, false on Windows
+    #[serde(default = "default_create_symlinks")]
+    pub create_bucket_symlinks: bool,
+}
+
+/// Default value for create_bucket_symlinks (platform-dependent)
+#[cfg(unix)]
+fn default_create_symlinks() -> bool {
+    true
+}
+
+#[cfg(not(unix))]
+fn default_create_symlinks() -> bool {
+    false
 }
 
 impl Config {
@@ -105,6 +121,7 @@ impl Config {
                 max_presign_rq_size: DEFAULT_MAX_PRESIGN_RQ_SIZE,
                 rq_timeout_secs: DEFAULT_RQ_TIMEOUT_SECS,
                 metadata_db_path: None,
+                create_bucket_symlinks: default_create_symlinks(),
             }
         } else {
             info!("⚙ Parsing config from environment variables");
@@ -156,6 +173,8 @@ impl Config {
         let rq_timeout_secs = get_from_env("RQ_TIMEOUT_SECS").unwrap_or(DEFAULT_RQ_TIMEOUT_SECS);
         let cors_origins = get_from_env("CORS_ORIGINS").ok(); // default is 'None'
         let metadata_db_path = get_from_env("METADATA_DB_PATH").ok(); // default is 'None'
+        let create_bucket_symlinks =
+            get_from_env("CREATE_BUCKET_SYMLINKS").unwrap_or(default_create_symlinks());
         Ok(Config {
             ip_addr,
             data_dir,
@@ -168,6 +187,7 @@ impl Config {
             max_presign_rq_size,
             rq_timeout_secs,
             metadata_db_path,
+            create_bucket_symlinks,
         })
     }
 }
