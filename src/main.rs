@@ -116,6 +116,9 @@ struct Args {
     #[arg(long)]
     presign_api_key: Option<String>,
 
+    #[arg(long)]
+    presign_hmac_secret: Option<String>,
+
     #[arg(short, long)]
     config: Option<PathBuf>,
 

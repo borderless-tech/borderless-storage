@@ -114,7 +114,7 @@ impl Config {
                 data_dir: args.data_dir.unwrap(),
                 domain: args.domain.unwrap(),
                 presign_api_key: args.presign_api_key.unwrap(),
-                presign_hmac_secret: None,
+                presign_hmac_secret: args.presign_hmac_secret,
                 cors_origins: None,
                 ttl_orphan_secs: DEFAULT_TTL_ORPHAN_SECS,
                 max_data_rq_size: DEFAULT_MAX_DATA_RQ_SIZE,
@@ -244,6 +244,7 @@ mod tests {
             ip_addr: Some(ip.to_string()),
             domain: Some(domain.to_string()),
             presign_api_key: Some(api_key.to_string()),
+            presign_hmac_secret: None,
             config: None,
             verbose: false,
         }
@@ -256,6 +257,7 @@ mod tests {
             ip_addr: None,
             domain: None,
             presign_api_key: None,
+            presign_hmac_secret: None,
             config: Some(path.to_path_buf()),
             verbose: true,
         }
@@ -269,6 +271,7 @@ mod tests {
             domain: None,
             config: None,
             presign_api_key: None,
+            presign_hmac_secret: None,
             verbose: false,
         }
     }
