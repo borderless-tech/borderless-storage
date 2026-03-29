@@ -170,9 +170,11 @@ fn build_service(config: Config, fs_controller: FsController) -> Router {
         SetResponseHeaderLayer::overriding(CACHE_CONTROL, HeaderValue::from_static("no-store"));
 
     let hmac_secret = if let Some(s) = config.presign_hmac_secret {
+        info!("🔒using hmac-secret provided by config");
         s.into_bytes()
     } else {
         /* generate random secret with 256 bit entropy */
+        info!("🔒generating a new hmac-secret");
         (0..255).map(|_| rand::random()).collect()
     };
 
