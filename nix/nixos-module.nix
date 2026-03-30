@@ -36,6 +36,12 @@ in
       type = lib.types.str;
       description = "API key for presign endpoints. Consider using a secrets manager.";
     };
+
+    presignHmacSecret = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "HMAC secret for pre-signed URLs. If null, the server generates a random secret on startup. Consider using a secrets manager.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -61,6 +67,8 @@ in
         IP_ADDR = cfg.address;
         DOMAIN = cfg.domain;
         PRESIGN_API_KEY = cfg.presignApiKey;
+      } // lib.optionalAttrs (cfg.presignHmacSecret != null) {
+        PRESIGN_HMAC_SECRET = cfg.presignHmacSecret;
       };
 
       serviceConfig = {

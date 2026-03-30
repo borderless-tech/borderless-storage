@@ -38,6 +38,12 @@ in
       default = "dev-secret-api-key";
       description = "API key for presign endpoints.";
     };
+
+    presignHmacSecret = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "HMAC secret for pre-signed URLs. If null, the server generates a random secret on startup.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -45,6 +51,7 @@ in
     env.IP_ADDR = cfg.address;
     env.DOMAIN = cfg.domain;
     env.PRESIGN_API_KEY = cfg.presignApiKey;
+    env.PRESIGN_HMAC_SECRET = lib.mkIf (cfg.presignHmacSecret != null) cfg.presignHmacSecret;
 
     enterShell = ''
       mkdir -p ${lib.escapeShellArg cfg.dataDir}
