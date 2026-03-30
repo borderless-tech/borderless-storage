@@ -18,7 +18,7 @@
 
         # Package metadata
         pname = "borderless-storage";
-        version = "0.3.1";
+        version = "0.3.2";
 
         # If you don't want to commit Cargo.lock, replace cargoLock with cargoHash = lib.fakeHash;
         # and run `nix build` once to get the real hash to paste back.
@@ -104,13 +104,10 @@
 
         # nix flake check  (useful for CI; builds + runs tests)
         checks.${pname} = borderlessPkg;
-      })
-    // (
-      let
+      }) // (let
         devenvModule = import ./nix/devenv-module.nix self;
         nixosModule = import ./nix/nixos-module.nix self;
-      in
-      {
+      in {
         devenvModules = {
           default = devenvModule;
           borderless-storage = devenvModule;
@@ -119,6 +116,5 @@
           default = nixosModule;
           borderless-storage = nixosModule;
         };
-      }
-    );
+      });
 }
