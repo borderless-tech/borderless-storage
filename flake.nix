@@ -104,5 +104,21 @@
 
         # nix flake check  (useful for CI; builds + runs tests)
         checks.${pname} = borderlessPkg;
-      });
+      })
+    // (
+      let
+        devenvModule = import ./nix/devenv-module.nix self;
+        nixosModule = import ./nix/nixos-module.nix self;
+      in
+      {
+        devenvModules = {
+          default = devenvModule;
+          borderless-storage = devenvModule;
+        };
+        nixosModules = {
+          default = nixosModule;
+          borderless-storage = nixosModule;
+        };
+      }
+    );
 }

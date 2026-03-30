@@ -283,6 +283,71 @@ docker run --rm -p 8080:8080 \
 
 Note: You don't have to specify `IP_ADDR` and `DATA_DIR`, as they are fixed inside the container.
 
+### Local development (devenv)
+
+If you use [devenv](https://devenv.sh), you can add borderless-storage as a managed process in your development environment.
+
+In your `devenv.yaml`, add the flake input:
+
+```yaml
+inputs:
+  borderless-storage:
+    url: github:borderless-tech/borderless-storage
+```
+
+Then in your `devenv.nix`:
+
+```nix
+{ inputs, pkgs, ... }:
+{
+  imports = [
+    inputs.borderless-storage.devenvModules.default
+  ];
+
+  services.borderless-storage = {
+    enable = true;
+    dataDir = "./storage-data";
+    address = "127.0.0.1:8080";
+    domain = "http://localhost:8080";
+    presignApiKey = "dev-secret-api-key";
+  };
+}
+```
+
+Running `devenv up` will start borderless-storage alongside your other processes.
+
+### Production (NixOS)
+
+To deploy on NixOS, add the flake input and import the NixOS module:
+
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    borderless-storage.url = "github:borderless-tech/borderless-storage";
+  };
+
+  outputs = { nixpkgs, borderless-storage, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        borderless-storage.nixosModules.default
+        {
+          services.borderless-storage = {
+            enable = true;
+            domain = "https://storage.example.com";
+            presignApiKey = "your-secure-api-key"; # consider using agenix/sops-nix
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+This creates a dedicated `borderless-storage` system user and group, manages the data directory, and runs the service with systemd hardening (NoNewPrivileges, PrivateTmp, ProtectSystem, ProtectHome).
+
 ### Manual build
 
 You can build this project manually like any rust project.
