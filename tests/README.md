@@ -42,6 +42,14 @@ This will run all tests sequentially and provide a summary at the end. Tests sto
 | `test-08-metadata-headers.sh` | Upload with Content-Type/Content-Disposition, verify preserved |
 | `test-09-authentication.sh` | Verify authentication required for admin endpoints |
 | `test-10-healthcheck.sh` | Test health check and stats endpoints |
+| `test-11-presign-security.sh` | Verify expired/tampered presigned URLs are rejected |
+| `test-12-chunked-edge-cases.sh` | Chunked upload: missing chunks on merge, invalid index |
+| `test-13-dedup-refcount.sh` | Delete one of two deduped blobs, other survives |
+| `test-14-admin-buckets.sh` | Admin bucket list, delete empty/non-empty bucket |
+| `test-15-request-limits.sh` | Oversized request body rejected by size limits |
+| `test-16-cleanup-orphans.sh` | Stale chunks cleaned up by background routine (~15s) |
+| `test-17-cors-preflight.sh` | OPTIONS preflight returns proper CORS headers |
+| `test-18-negative-cases.sh` | 404s, zero-byte uploads, default metadata fallback |
 
 ## Configuration
 
