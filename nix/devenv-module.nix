@@ -3,6 +3,13 @@ self:
 
 let
   cfg = config.services.borderless-storage;
+
+  # Derive the readiness-probe target from the bound address (ip:port). A
+  # wildcard bind isn't connectable as a client, so probe loopback instead.
+  addrParts = lib.splitString ":" cfg.address;
+  boundHost = builtins.elemAt addrParts 0;
+  probeHost = if (boundHost == "0.0.0.0" || boundHost == "") then "127.0.0.1" else boundHost;
+  probePort = lib.toInt (builtins.elemAt addrParts 1);
 in
 {
   options.services.borderless-storage = {
@@ -57,6 +64,22 @@ in
       mkdir -p ${lib.escapeShellArg cfg.dataDir}
     '';
 
-    processes.borderless-storage.exec = "${cfg.package}/bin/borderless-storage";
+    processes.borderless-storage = {
+      exec = "${cfg.package}/bin/borderless-storage";
+      # The server merges /healthz into its main router (same port as the API),
+      # so the service owns its own readiness probe. Lets consumers gate on
+      # `depends_on.borderless-storage.condition = "process_healthy"`.
+      process-compose.readiness_probe = {
+        http_get = {
+          host = probeHost;
+          port = probePort;
+          path = "/healthz";
+        };
+        initial_delay_seconds = 1;
+        period_seconds = 2;
+        timeout_seconds = 5;
+        failure_threshold = 15;
+      };
+    };
   };
 }
